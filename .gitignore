@@ -1,0 +1,33 @@
+# ------------------------------------------------------------------
+#  TP Messaging — .gitignore
+# ------------------------------------------------------------------
+# This repo ships NO Java (it lives in ../springboot), and the broker's
+# data lives on the named volume `rabbit-data` — so there is little to
+# ignore. Only local scratch and OS cruft.
+
+# Local data / secrets
+*.env
+.env
+.env.*
+*.local
+*.db
+*.sqlite
+
+# Ad-hoc scratch / shell-redirect output (e.g. `docker compose ... 2> err.txt`)
+/err*.txt
+/out*.txt
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# logs (tail output, etc.)
+*.log
