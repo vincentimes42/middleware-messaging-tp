@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------
 #  TP Messaging — .gitignore
 # ------------------------------------------------------------------
-# This repo ships NO Java (it lives in ../springboot), and the broker's
+# This repo ships NO Java (it lives in the TP1 Spring Boot repo), and the
 # data lives on the named volume `rabbit-data` — so there is little to
 # ignore. Only local scratch and OS cruft.
 

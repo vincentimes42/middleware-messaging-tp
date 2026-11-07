@@ -5,10 +5,14 @@ by the app**, a **202 SENT** is **buffered** (not consumed), a **consumer**
 drains it to `DELIVERED`, a **poison** lands in the **DLQ**, and a **broker
 outage** is a clean **503**. Everything here is **copy-pasteable**.
 
-> **Prereq:** the TP1 base (`../springboot`) is up at `http://localhost:8080`,
-> **TP1 is green**, and you have **two** TP1 SELLER accounts (e.g. `buyer@test`
-> and `seller@test`) plus **one more** (e.g. `carol@test`) for the
-> non-participant cases. Create them with TP1's `POST /auth/register`.
+> **Prereq:** the TP1 app (your `springboot` repo) is up at
+> `http://localhost:8080`, **TP1 is green**, and you have **two** TP1
+> accounts (e.g. `buyer@test` and `seller@test`) plus **one more**
+> (e.g. `carol@test`) for the non-participant cases. Create them with
+> TP1's `POST /auth/register`.
+>
+> **Paths:** the commands below use two variables (set them once in the
+> terminal, see the "Paths" box below).
 
 ## 1) Prereqs and ports
 
@@ -24,13 +28,26 @@ Broker login (both the UI and the API): **`listings`** / **`listings`**.
 ## 2) Start
 
 ```bash
-cd ../springboot && docker compose up -d        # base: API (8080) + pg (5435)
-cd ../messaging  && docker compose up -d        # this: RabbitMQ (5673/15673)
-docker compose ps                               # rabbitmq healthy
-cd ../springboot && docker compose up -d --build listings-api   # pick up the starter + edit
+# 1) RabbitMQ first (the app connects to it on boot — broker must be up first)
+cd "$MSG_DIR" && docker compose up -d
+docker compose ps                              # rabbitmq healthy
+
+# 2) then the TP1 app (rebuild to pick up the starter + edits from README §0)
+cd "$TP1_DIR" && docker compose up -d --build
+curl -fsS http://localhost:8080/actuator/health
 ```
 
-## 3) The login credentials (used in every curl below)
+## 3) Set the two repo paths (once per terminal)
+
+The commands below target your **two repos** by the `TP1_DIR` and `MSG_DIR`
+variables (your two repo folders can be **named** anything — the commands do **not** assume a relative path):
+
+```bash
+export TP1_DIR="/path/to/your-tps1-repo"     # the Spring Boot app repo
+export MSG_DIR="/path/to/messaging-repo"     # this messaging repo
+```
+
+## 4) The login credentials (used in every curl below)
 
 ```bash
 BUYER='buyer@test:secret123'
@@ -79,7 +96,7 @@ with `durable: true` **and** an `arguments` object containing
 `x-dead-letter-exchange-type`; queue `listings.messages.dlq` (`durable: true`,
 `consumers: 0`).
 
-> **Durable check:** `docker compose -f ../messaging/docker-compose.yml restart
+> **Durable check:** `docker compose -f "$MSG_DIR/docker-compose.yml" restart
 > rabbitmq && sleep 6` → re-run the two `GET /api/queues` — **both still exist**
 > (the volume persisted them).
 
@@ -107,7 +124,7 @@ curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
   | python3 -c 'import sys,json; q=json.load(sys.stdin)[0]; print("ready =",q["messages_ready"],"consumers =",q["consumers"])'
 
 # the DB row is SENT (the 202 happened before any consume)
-cd ../springboot && docker compose exec listings-postgres psql -U listings -d listings \
+cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
   -c "SELECT message_id, from_user_id, to_user_id, status FROM message WHERE message_id='$MID'"
 ```
 
@@ -139,7 +156,7 @@ sleep 3
 curl -fsS -u $BUYER http://localhost:8080/listings/1/messages | python3 -m json.tool
 
 # DB: every row is DELIVERED now
-docker compose exec listings-postgres psql -U listings -d listings \
+cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
   -c "SELECT to_char(sent_at at time zone 'UTC' as 'HH24:MI:SS'), from_user_id, to_user_id, status FROM message WHERE listing_id=1 ORDER BY sent_at"
 
 # a NON-participant sees an EMPTY thread (not 403)
@@ -172,7 +189,7 @@ curl -fsS -u $MQ "http://localhost:15673/api/queues/%2F/listings.messages.dlq/ge
 curl -fsS -u $BUYER -X POST http://localhost:8080/listings/1/messages \
   -H 'Content-Type: application/json' -d '{"body":"after the poison, still here?"}' >/dev/null
 sleep 2
-docker compose -f ../springboot/docker-compose.yml exec listings-postgres psql -U listings -d listings \
+docker compose -f "$TP1_DIR/docker-compose.yml" exec listings-postgres psql -U listings -d listings \
   -c "SELECT count(*) AS delivered FROM message WHERE status='DELIVERED'"
 ```
 
@@ -183,7 +200,7 @@ docker compose -f ../springboot/docker-compose.yml exec listings-postgres psql -
 
 ```bash
 # stop ONLY the broker
-cd ../messaging && docker compose stop rabbitmq
+cd "$MSG_DIR" && docker compose stop rabbitmq
 
 # publish -> 503 (clean, not 500, not a hang)
 curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST \
@@ -212,45 +229,45 @@ the message must be **redelivered** but **not duplicated**.
 # one in-flight message, then kill the app before ack
 curl -fsS -u $BUYER -X POST http://localhost:8080/listings/1/messages \
   -H 'Content-Type: application/json' -d '{"body":"in flight?"}' >/dev/null
-cd ../springboot && docker compose stop listings-api     # broker KEEPS it (durable)
+cd "$TP1_DIR" && docker compose stop listings-api     # broker KEEPS it (durable)
 
 # the queue still holds it (ready=1), 0 delivered
-cd ../messaging && curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
+curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
   | python3 -c 'import sys,json;q=json.load(sys.stdin)[0];print("ready =",q["messages_ready"],"consumers =",q["consumers"])'
 
 # restart the consumer -> it drains, deliveries counter shows >= 2 (at-least-once)
-cd ../springboot && docker compose up -d listings-api && sleep 6
-cd ../messaging && curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
+cd "$TP1_DIR" && docker compose up -d listings-api && sleep 6
+curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
   | python3 -c 'import sys,json;q=json.load(sys.stdin)[0];print("ready =",q["messages_ready"],"deliveries =",q["deliveries_total"])'
 
 # NO duplication: exactly the expected number of rows (not double)
-cd ../springboot && docker compose exec listings-postgres psql -U listings -d listings \
+cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
   -c "SELECT status, count(*) FROM message WHERE listing_id=1 GROUP BY status"
 ```
 
 ## 11) Step 8 (bonus) — transactional outbox (202 even broker down)
 
 ```bash
-cd ../messaging && docker compose stop rabbitmq
+cd "$MSG_DIR" && docker compose stop rabbitmq
 # with the outbox enabled (Steps 8), the publish is 202 PENDING, not 503
 curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST \
   http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"queued while down?"}'
 
 # the row is PENDING in the DB (not in the broker)
-cd ../springboot && docker compose exec listings-postgres psql -U listings -d listings \
+cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
   -c "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"
 
 # start the broker -> the poller claims + publishes -> SENT -> DELIVERED
-cd ../messaging && docker compose start rabbitmq && sleep 10
-cd ../springboot && docker compose exec listings-postgres psql -U listings -d listings \
+cd "$MSG_DIR" && docker compose start rabbitmq && sleep 10
+cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
   -c "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"
 ```
 
 ## 12) Stop
 
 ```bash
-cd ../messaging   && docker compose down          # keep the broker volume
-cd ../springboot  && docker compose down          # keep the Postgres
+cd "$MSG_DIR" && docker compose down          # keep the broker volume
+cd "$TP1_DIR" && docker compose down          # keep the Postgres
 # wipe everything: add -v to either `down`
 ```
 

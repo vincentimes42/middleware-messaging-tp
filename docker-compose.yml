@@ -1,7 +1,6 @@
 # =====================================================================
-#  TP Messaging — attaches to the SHARED `middleware` network (base:
-#  ../springboot/docker-compose.yml, which runs listings-api +
-#  listings-postgres). This project adds ONE service:
+#  TP Messaging — attaches to the SHARED `middleware` network (base: the TP1 Spring Boot repo's `docker-compose.yml`, which runs
+#  `listings-api` + `listings-postgres`). This project adds ONE service:
 #       - rabbitmq          -> AMQP on host 5673 (internal 5672)
 #                              management UI on host 15673 (internal 15672)
 #
@@ -22,14 +21,14 @@
 #      `localhost`. From inside the API container, the broker is
 #      `rabbitmq:5672` (its INTERNAL port), never `localhost`.
 #
-#  BEFORE YOU RUN: read "Run" in ../messaging/README.md. It tells you the
-#  required edit to make in ../springboot/docker-compose.yml (point the API at
+#  BEFORE YOU RUN: read "Run" in this repo's `README.md`. It tells you the
+#  required edit to make in the TP1 Spring Boot repo's `docker-compose.yml` (point the API at
 #  the broker over the network name `rabbitmq`; the host port stays 8080).
 #  The exact snippet is in the box at the bottom of this file.
 #
 #  Run order (base owns the API, so it is always there first):
-#      $ cd ../springboot && docker compose up -d   # base: API on 8080 + pg on 5435
-#      $ cd ../messaging  && docker compose up -d   # this: RabbitMQ on 5673 + 15673
+#      $ cd <TP1-repo-folder>  && docker compose up -d   # base: API on 8080 + pg on 5435
+#      $ cd <messaging-repo-folder> && docker compose up -d   # this: RabbitMQ on 5673 + 15673
 #  Health (API) : curl -fsS http://localhost:8080/actuator/health
 #  Health (MQ)  : curl -fsS -u listings:listings http://localhost:15673/api/overview
 # =====================================================================
@@ -88,13 +87,13 @@ services:
       start_period: 30s
 
 # =====================================================================
-#  REQUIRED EDIT in ../springboot/docker-compose.yml  (see README "Run")
+#  REQUIRED EDIT in the TP1 Spring Boot repo's `docker-compose.yml`  (see this repo's README "Run")
 #
 #  In the `listings-api` service, add this to `environment:`. The API points
 #  at the broker by its NETWORK NAME (`rabbitmq`) and its INTERNAL port
 #  (5672) — from inside the API container `localhost` is the container itself,
-#  so `localhost` must never be used here (the same split that Keycloak's
-#  JWKS-URI uses: issuer=host-URL, JWKS=network name).
+#  so the API must reach the broker by its network name (`rabbitmq`), never by
+#  `localhost`.
 #
 #      RABBITMQ_HOST: "rabbitmq"
 #      RABBITMQ_PORT: "5672"

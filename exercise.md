@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a **follow-up** to the Spring Boot TP (TP1, `../springboot/`). We reuse
+This is a **follow-up** to the Spring Boot TP (TP1, the **Spring Boot repo** you have). We reuse
 the **TP1 listings API** — unchanged domain, unchanged port (8080), unchanged
 **HTTP Basic** auth — and add a **messaging layer**: an asynchronous
 **buyer → seller** conversation, backed by an **external AMQP broker**
@@ -16,9 +16,8 @@ the **TP1 listings API** — unchanged domain, unchanged port (8080), unchanged
    (a new `GET /listings/{id}/messages` thread view). Several buyers can queue
    up before the seller is even online — that **buffer is the middleware**.
 
-There **is** a new Docker service and two extra host ports this time (unlike the
-IA TP): the **RabbitMQ** broker — AMQP on host **5673**, management
-UI/API on host **15673**. The API stays on **8080**, unchanged.
+There is **one new service**: the **RabbitMQ** broker (management UI on port
+**15673**, AMQP on port **5673**). The API stays on **8080**, unchanged.
 
 **Validation method (the contract):** you prove each step with **`curl`** (the
 REST endpoint and the RabbitMQ **management API**), a read of the **Postgres**
@@ -27,17 +26,13 @@ bindings, the DLQ), and a **grep of your own Java** — **not** with a Java test
 suite (writing tests is optional and not part of the deliverable). The per-step
 `Acceptance checklist` **is** the "definition of done". Every command you need
 is copy-pasteable in [`docs/verification.md`](docs/verification.md). The
-**code** lives in **your copy of `../springboot`** (a new
+**code** lives in **your Spring Boot (TP1) repo** (a new
 `com.app.listings.messaging` package); **this repo** (`messaging/`) only owns
 the statement, the broker compose, and the verification commands.
 
 > **Prerequisite: TP1 is done and green.** The TP1 API passes its core
 > checklists (register, CRUD, ownership 401/403/404, `?version=V1|V2`) and runs
 > on port 8080. Finish TP1 first — this TP only adds a messaging layer on top.
->
-> This is an **alternative** to [TP Keycloak](../keycloak),
-> [TP Monitoring](../monitoring) and [TP IA](../IA) for the second session.
-> All start the same base `listings-api`, so run **one** at a time.
 
 ---
 
@@ -91,19 +86,11 @@ New to AMQP? This ~3-minute model makes the steps below click.
    +-----------------------------------------------------------+
 ```
 
-### The stack (versions pinned — do not guess)
-
-| Piece | Coordinates / tag | Used by |
-|---|---|---|
-| Spring AMQP starter | `org.springframework.boot:spring-boot-starter-amqp` (**no version** — managed by the Boot 4.1.1 BOM: spring-amqp **4.1.1**, rabbitmq-client **5.30.0**) | Steps 1-8 |
-| RabbitMQ image | `rabbitmq:4.2-management` (management plugin bundled) | the whole TP |
-| Management API/UI | `http://localhost:15673` (`/api/overview`, `/api/queues`, `/api/exchanges`) | the **observable surface** of every step |
-
-> **Why one library and one broker:** Spring AMQP is the **client** (the
-> `RabbitTemplate` producer + the `@RabbitListener` consumer). **RabbitMQ** is
-> the **server** that stores and routes the messages. Keep the two separate in
-> your head: you `POST` an HTTP request to your API; your API speaks **AMQP** to
-> the broker; the broker routes to the queue; your API reads it back.
+> **Why one library and one broker:** **Spring AMQP** is the client side of
+> your API (the `RabbitTemplate` producer + the `@RabbitListener` consumer).
+> **RabbitMQ** is the server that stores and routes the messages. Keep the two
+> separate in your head: a buyer `POST`s to your API; your API speaks **AMQP**
+> to the broker; the broker routes to the queue; your API reads it back.
 
 ---
 
@@ -259,20 +246,20 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 | 1.3 | The app boots with the **`spring-boot-starter-amqp`** on the classpath and **connects** to `rabbitmq:5672` (over the network name, not `localhost`). A connection appears in the management UI / `GET /api/connections` once the app has sent its first publish (Step 3). |
 | 1.4 | `mvn clean verify` stays **green** (the TP1 smoke test still boots — it only needs Postgres, so it does **not** require RabbitMQ to be up). |
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
 | `pom.xml` | (no AMQP) | **add** `org.springframework.boot:spring-boot-starter-amqp` — **no version** (Boot 4.1.1 BOM: spring-amqp 4.1.1, rabbitmq-client 5.30.0) |
 | `application.yml` | (none) | **add** the `spring.rabbitmq` block — `host: ${RABBITMQ_HOST:localhost}`, `port: ${RABBITMQ_PORT:5673}`, `username: ${RABBITMQ_USERNAME:listings}`, `password: ${RABBITMQ_PASSWORD:listings}` (Appendix A) |
-| `../springboot/docker-compose.yml` | (no RABBITMQ_*) | **add** to `listings-api.environment`: `RABBITMQ_HOST: "rabbitmq"` and `RABBITMQ_PORT: "5672"` (the **network name** + **internal** port — see the REQUIRED EDIT at the bottom of `../messaging/docker-compose.yml`) |
+| the TP1 repo's `docker-compose.yml` | (no RABBITMQ_*) | **add** to `listings-api.environment`: `RABBITMQ_HOST: "rabbitmq"` and `RABBITMQ_PORT: "5672"` (the **network name** + **internal** port — see the REQUIRED EDIT at the bottom of this **messaging** repo's `docker-compose.yml`) |
 
 ### Acceptance checklist
 
 - [ ] `docker compose ps` (in **both** folders) — `listings-api` **healthy**, `rabbitmq` **healthy**
 - [ ] `curl -fsS -u listings:listings http://localhost:15673/api/overview` → **200** (and the same call **without** `-u` → **401**)
 - [ ] `curl -fsS http://localhost:8080/actuator/health` → **200** (the app boots **with** the AMQP starter on the classpath)
-- [ ] `mvn clean verify` in `../springboot` is **green**
+- [ ] `mvn clean verify` (in the **TP1 repo**) is **green**
 - [ ] **No queue exists yet** — `curl -s -u listings:listings http://localhost:15673/api/queues` → **200** with an **empty** list (the queues are declared by the app in Step 2)
 
 ### Hints
@@ -283,8 +270,8 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 - **Network name, not localhost:** from inside the `listings-api` container,
   `localhost` is the container **itself**, so the AMQP target **must** be the
   network name `rabbitmq` on its **internal** port `5672` (host port `5673` is
-  only for *your* curl). This is the **same split** the Keycloak TP uses for
-  issuer-URI vs JWKS-URI.
+  only for *your* curl). The rule is the same everywhere: from inside a
+  container, reach the other service by its network name, not `localhost`.
 - The broker **persists** to a named volume (`rabbit-data`), so `docker
   compose down` (without `-v`) keeps the queue state.
 - Verify: [`docs/verification.md` §4](docs/verification.md).
@@ -308,7 +295,7 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 | 2.5 | Restarting the app **does not duplicate** any exchange, queue, or binding (declarations are **idempotent** — re-start = same topology). |
 | 2.6 | **No consumer is attached yet** — `consumers == 0` on `listings.messages` (that is Step 4). |
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
@@ -328,7 +315,7 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 - [ ] `GET /api/queues?name=listings.messages.dlq` → `durable=true`, `consumers=0`
 - [ ] `GET /api/exchanges/listings.direct/bindings/queue` → the **binding** of `listings.direct` → `listings.messages` is present, with routing key `listings.messages`
 - [ ] `docker compose restart rabbitmq && sleep 5` — the **same** two queues exist again (persistence + durable)
-- [ ] `grep -rn "RabbitAdmin\|@Bean.*Queue\|@Bean.*Exchange\|@Bean.*Binding" ../springboot/src/main/java/com/app/listings/messaging/config` — the `RabbitConfig` class contains **all** of them
+- [ ] `grep -rn "RabbitAdmin\|@Bean.*Queue\|@Bean.*Exchange\|@Bean.*Binding" src/main/java/com/app/listings/messaging/config` (in the TP1 repo) — the `RabbitConfig` class contains **all** of them
 
 ### Hints
 
@@ -400,11 +387,11 @@ is rejected (`422`).
 > > question** on a listing, and any account may **reply** to a message in its
 > > own thread. The one structural constraint is `from != to`. (In production
 > > `toUserId` could instead be a **claim** — an `X-Actor` header, a `userId`
-> > in a Keycloak JWT's `sub`, or the IA TP's Basic email — rather than
+> > in a JWT's `sub` claim, or a Basic email — rather than
 > > derived; this TP keeps the derivation because it is the simplest contract
 > > that still fits in one row per turn.)
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
@@ -423,7 +410,7 @@ is rejected (`422`).
 - [ ] `curl -i -u seller@test:secret123 http://localhost:8080/listings/1/messages` → **200**, a **JSON array** of all buyers' messages, ascending `sentAt`
 - [ ] `curl -i -u buyer@test:secret123 -X POST .../messages -d '{"body":"hi","inReplyTo":"<non-existent-uuid>"}'` → **422** with `fields.inReplyTo`
 - [ ] `curl -i -u alice@test:secret123 -X POST .../messages -d '{"body":"hi"}'` **on a listing owned by alice** → **422** (self-message)
-- [ ] `grep -n "RabbitTemplate" ../springboot/src/main/java/com/app/listings/messaging/` — at least **one** reference (the producer)
+- [ ] `grep -n "RabbitTemplate" src/main/java/com/app/listings/messaging/` (in the TP1 repo) — at least **one** reference (the producer)
 
 ### Hints
 
@@ -453,7 +440,7 @@ is rejected (`422`).
 | 4.5 | **Acknowledge** is **automatic** (Spring AMQP default) — no manual `channel.basicAck(...)` is required, but the listener **must not** throw an **uncaught** exception for the "business" cases (a missing buyer, an orphan `inReplyTo`, etc.) — those are **logged and swallowed**, not thrown. |
 | 4.6 | **Poison** (a message the listener deliberately **rejects** with `basicRequeue=false`) → the broker **reroutes** it to `listings.messages.dlq` (Step 5 proves this). |
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
@@ -467,7 +454,7 @@ is rejected (`422`).
 - [ ] **Seller replies** with `inReplyTo = <the buyer's messageId>` → the **buyer's** `GET` now shows **their own + the seller's reply**, both `DELIVERED` (or `SENT` for the latest turn)
 - [ ] **Duplicate delivery drill**: open a **second** terminal and **re-publish** the **exact** same JSON to the same routing key via the **management UI** → only **one** row in `message` for that `message_id` (the second is a no-op)
 - [ ] `docker compose logs -f listings-api` → **no** stack-trace on the "business" reject cases (a buyer that no longer exists); a `log.warn` is **expected** (the listener is alive and **choosing** to skip)
-- [ ] `grep -n "@RabbitListener" ../springboot/src/main/java/com/app/listings/messaging/MessageListener.java` → the annotation is on the queue **name** (the **literal** string `listings.messages`)
+- [ ] `grep -n "@RabbitListener" src/main/java/com/app/listings/messaging/MessageListener.java` (in the TP1 repo) → the annotation is on the queue **name** (the **literal** string `listings.messages`)
 
 ### Hints
 
@@ -576,7 +563,7 @@ is rejected (`422`).
 | 6.6 | **The consumer survives the outage**: messages that were **already in the queue** (ready count > 0 before the stop) are **still there** after the start (the **durable** queue + the **broker's Mnesia table persistence** is doing its job). Once the consumer reconnects (or after `start`), they are **drained** and **persisted** to `message` (the `SENT` rows become `DELIVERED`). |
 | 6.7 | **The failure must be fast** (≤ ~2 seconds) — a `connect` timeout of `10s` or `30s` is **too long** for the lab; the **starter** default is fine, but the **503 path** must be a **clean** one (not a **500** from a `AmqpConnectException` being **thrown** uncaught out of the controller). |
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
@@ -701,14 +688,14 @@ is rejected (`422`).
 | 8.5 | **Idempotency** (Step 4 **still** applies): a **redelivered** `PENDING → SENT → DELIVERED` row is **upserted** by the **consumer** (Step 4's `message_id`-unique pattern) so **no** duplication. |
 | 8.6 | **Multi-instance safety**: with **2** instances of `listings-api` running, the **poller** does **not** double-publish (the **`UPDATE … WHERE status = 'PENDING'`** is an **atomic** claim; the **loser** gets **0** rows updated and does **not** publish). This is the **whole reason** the **`UPDATE`** is **before** the `RabbitTemplate.convertAndSend`, not after. |
 
-### Changes to make in TP1 (`../springboot`)
+### Changes to make in the TP1 repo
 
 | What | From (TP1) | To (this step) |
 |---|---|---|
 | `MessageEntity` (Step 3) | `status` ∈ `SENT \| DELIVERED` (and the **enum** has those **two**) | **add** `PENDING` to the **`MessageStatus`** enum (the **`v1.1-messages.yaml`** schema **already** allows it if you declared the `status` as a **`VARCHAR(16)`** — **not** a PG `enum` — **which is the choice** for this reason; if you **did** declare a PG `enum`, you **cannot** add a value without a migration, so **re-decide**) |
 | `MessageService` (Step 3, 6) | the **publish path** is either: **`SENT`** (202) or **`503`** (Step 6) — **two** paths | **one path**: **`PENDING`** (202) **when the broker is down**, **`SENT`** (202) **when it is up**. **The 503 path is removed** (the contract is **stronger**, and the **buyer** is **not** told "the broker is down" — they are **told** "the message is queued, it will be delivered"). **The Step 6 `@ExceptionHandler(BrokerUnavailableException)` can be removed** or **kept** (the **latter** is **better** — if someone **does** try a **direct** `convertAndSend` **outside** the **service**, the **503** still **fires**) |
 | (new) `com.app.listings.messaging.MessageOutbox` | — | a **`@Component`** with a **`@Scheduled(fixedDelayString = "${listings.messaging.outbox.interval-ms:5000}")`** **method** that: **1.** selects `PENDING` rows (oldest first), **2.** for **each** row, **atomically** claims it (`UPDATE message SET status='SENT' WHERE message_id=? AND status='PENDING'`), **3.** **publishes** the claimed row via `RabbitTemplate`, **4.** on **publish failure**, **reverts** the row to `PENDING` (and **logs** — the **poller** will retry on the next cycle) |
-| (new) **`application.yml`** | (none) | **add** the key `listings.messaging.outbox.interval-ms: ${LISTINGS_MESSAGING_OUTBOX_INTERVAL_MS:5000}` (and the **equivalent** env var in `../springboot/docker-compose.yml` **if** you want to tune it) |
+| (new) **`application.yml`** | (none) | **add** the key `listings.messaging.outbox.interval-ms: ${LISTINGS_MESSAGING_OUTBOX_INTERVAL_MS:5000}` (and the **equivalent** env var in the TP1 repo's `docker-compose.yml` **if** you want to tune it) |
 
 ### Acceptance checklist
 
@@ -718,8 +705,8 @@ is rejected (`422`).
 - [ ] `GET /api/queues?name=listings.messages` → `ready` = **+N** (the **N** messages just published), then → **`0`** as the consumer drains (Step 4's `@RabbitListener` is **unchanged** and **still** picks them up)
 - [ ] **`psql SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 5`** → the **`3`** PENDING rows are now **`DELIVERED`** (the **full** chain **PENDING → SENT → DELIVERED** is **visible** in the same table)
 - [ ] **No 503** anywhere in the **`docker compose logs listings-api`** **during** this drill (the **Step 6 handler** is **not triggered** because the **`MessageService`** **catches** the `BrokerUnavailableException` **internally** and **returns** a **`PENDING`** result **instead of rethrowing** it)
-- [ ] **`grep -n "@Scheduled" ../springboot/src/main/java/com/app/listings/messaging/MessageOutbox.java`** → the **annotation** is **present**, with the **`fixedDelayString`** (or `fixedRate`) pointing at the **`application.yml`** key
-- [ ] **`grep -n "UPDATE.*status='PENDING'\|UPDATE.*WHERE.*status" ../springboot/src/main/java/com/app/listings/messaging/`** — the **claim** is **before** the **`convertAndSend`** (atomic)
+- [ ] **`grep -n "@Scheduled" src/main/java/com/app/listings/messaging/MessageOutbox.java` (in the TP1 repo)** → the **annotation** is **present**, with the **`fixedDelayString`** (or `fixedRate`) pointing at the **`application.yml`** key
+- [ ] **`grep -n "UPDATE.*status='PENDING'\|UPDATE.*WHERE.*status" src/main/java/com/app/listings/messaging/` (in the TP1 repo)** — the **claim** is **before** the **`convertAndSend`** (atomic)
 - [ ] **`listings.messaging.outbox.interval-ms`** is **env-overridable** (the `application.yml` reads from `${…}`), **not** hard-coded
 
 ### Hints
@@ -743,13 +730,13 @@ is rejected (`422`).
 
 ### Acceptance checklist
 
-- [ ] `cd ../springboot && docker compose up -d --build` → **healthy**
-- [ ] `cd ../messaging && docker compose up -d` → **healthy**
+- [ ] `cd <tp1-repo-folder> && docker compose up -d --build` → **healthy**
+- [ ] `cd <messaging-repo-folder> && docker compose up -d` → **healthy**
 - [ ] `curl -fsS http://localhost:8080/actuator/health` → **200**
 - [ ] **One** buyer `POST` → **202** with `SENT`, the message is in **`listings.messages`** (management UI `ready = 1`)
 - [ ] **One** consumer drain → the row flips to **`DELIVERED`** in `psql`, and the **seller's** `GET` returns the message
-- [ ] `mvn clean verify` in `../springboot` → **green** (the TP1 **smoke test** + your **messaging** smoke test **both** boot)
-- [ ] **The decision log is in the team README** of `../springboot` (see *Deliverables* below, item 2) — the **5–6** short paragraphs of *why* the choices were made
+- [ ] `mvn clean verify` (in the TP1 repo) → **green** (the TP1 **smoke test** + your **messaging** smoke test **both** boot)
+- [ ] **The decision log is in the TP1 repo's README** (the team README) (see *Deliverables* below, item 2) — the **5–6** short paragraphs of *why* the choices were made
 - [ ] **No** secrets in the repo: `RABBITMQ_DEFAULT_PASS: listings` is in the **compose** (the **broker** credential, **not** the API secret) and is **not** in `application.yml` (the `application.yml` reads **`${RABBITMQ_PASSWORD:listings}`**, where `listings` is the **default** for **local** dev — and **any** other password is **env-injected** in compose, not committed)
 - [ ] **The `messaging/` repo is committed** (this folder): `exercise.md` (this file), `docker-compose.yml`, `README.md`, `docs/verification.md`
 - [ ] **The `springboot/` repo is committed** (the TP1 repo): the **messaging module** code, the **2** edits (`pom.xml` + `application.yml`), the **base compose** edits (`RABBITMQ_HOST` + `RABBITMQ_PORT`), and the **team README** (with the **decision log**)
@@ -760,7 +747,7 @@ is rejected (`422`).
   *what* they decided and *why* — it is **not** a **copy** of the **exercise
   statement** (that is in `messaging/exercise.md`). It is **5–6** short
   paragraphs, one per **major** decision.
-- The **smoke test** to add in `../springboot` is the **lowest** bar: **the
+- The **smoke test** to add to the **TP1 repo** is the **lowest** bar: **the
   context boots**. If it needs the **broker** up, it **uses** the **base
   compose's** `rabbitmq` (via `TESTCONTAINERS_RABBITMQ_HOST` or the **same**
   network name). If it needs Postgres, it **already** does (TP1). The **smoke
@@ -775,9 +762,9 @@ is rejected (`422`).
 
 | Item | Detail |
 |---|---|
-| **Pair's TP1 repo** (`../springboot/`) | `+1 dep` (`spring-boot-starter-amqp`, **no** version — Appendix A); `+` the `spring.rabbitmq` block in `application.yml`; `+` the **base compose** `RABBITMQ_HOST` + `RABBITMQ_PORT` env; `+` the `com.app.listings.messaging` package (`RabbitConfig`, `MessageEntity`, `MessageRepository`, `MessageService`, `MessageController`, `MessageListener`, **Step 6**: `BrokerUnavailableException` + a **`@ExceptionHandler`** in TP1's `GlobalExceptionHandler`, **Step 7–8** optional: `MessageOutbox` + the `@EnableScheduling` config + `listings.messaging.outbox.interval-ms` key); Liquibase `v1.1-messages.yaml` + include in the changelog master; `README.md` updated with the **decision log** |
-| **This repo** (`messaging/`) | `exercise.md` (this file), `README.md` (operational), `docker-compose.yml` (the RabbitMQ broker), `docs/verification.md` (the copy-paste `curl`s + `psql`). **No Java in this repo** — the pair's `../springboot` is the only place code is committed (single owner, one repo per artifact) |
-| **`mvn clean verify`** in `../springboot` | **Green** |
+| **The TP1 repo** (the Spring Boot app) | `+1 dep` (`spring-boot-starter-amqp`, **no** version — Appendix A); `+` the `spring.rabbitmq` block in `application.yml`; `+` the **base compose** `RABBITMQ_HOST` + `RABBITMQ_PORT` env; `+` the `com.app.listings.messaging` package (`RabbitConfig`, `MessageEntity`, `MessageRepository`, `MessageService`, `MessageController`, `MessageListener`, **Step 6**: `BrokerUnavailableException` + a **`@ExceptionHandler`** in TP1's `GlobalExceptionHandler`, **Step 7–8** optional: `MessageOutbox` + the `@EnableScheduling` config + `listings.messaging.outbox.interval-ms` key); Liquibase `v1.1-messages.yaml` + include in the changelog master; `README.md` updated with the **decision log** |
+| **This repo** (`messaging/`) | `exercise.md` (this file), `README.md` (operational), `docker-compose.yml` (the RabbitMQ broker), `docs/verification.md` (the copy-paste `curl`s + `psql`). **No Java in this repo** — the **TP1 repo** is the only place code is committed (single owner, one repo per artifact) |
+| **`mvn clean verify`** in the TP1 repo | **Green** |
 | **Oral** | 10 min + 5 min Q&A |
 
 > **Do not commit** into the pair's TP1 repo (or this one):
@@ -793,15 +780,14 @@ is rejected (`422`).
 ## Appendix A — the one dependency + the three config keys
 
 The **code to paste is not in this file** — by design, it lives in the
-**operational** [`README.md` → "0) Required base edit"](README.md), exactly
-where the Keycloak and Monitoring TPs put their base edits. This appendix is
+**operational** [`README.md` → "0) Required base edit"](README.md), exactly where the other TPs put their base edits. This appendix is
 the **reference** for *what* the additions are and *why*.
 
 | Addition | Coordinates / key | Why |
 |---|---|---|
 | Spring AMQP starter | `org.springframework.boot:spring-boot-starter-amqp` — **no version** (Boot 4.1.1 BOM pulls spring-amqp **4.1.1** + rabbitmq-client **5.30.0**) | provides **`RabbitTemplate`** (producer), **`@RabbitListener`** (consumer), **`RabbitAdmin`** (auto-declares queues/exchanges/bindings **idempotently**) |
 | `application.yml` | `spring.rabbitmq.host` / `port` / `username` / `password` — **all** env-overridable (`${RABBITMQ_HOST:localhost}`, etc.) | the **host** default is for `mvn spring-boot:run`; the compose edit (next row) **overrides** `port` (5672) and **`host`** (the **network name** `rabbitmq`) at runtime |
-| `../springboot/docker-compose.yml` | `listings-api.environment`: `RABBITMQ_HOST: rabbitmq` + `RABBITMQ_PORT: "5672"` | from **inside** the API container, `localhost` is the **container itself**; the app must reach the broker via its **network name** on the **internal** port |
+| the TP1 repo's `docker-compose.yml` | `listings-api.environment`: `RABBITMQ_HOST: rabbitmq` + `RABBITMQ_PORT: "5672"` | from **inside** the API container, `localhost` is the **container itself**; the app must reach the broker via its **network name** on the **internal** port |
 
 > **One owner per fact:** the exact `pom.xml` / `application.yml` /
 > `docker-compose.yml` to paste lives in **`README.md`**; this appendix
@@ -841,10 +827,10 @@ available** — see the compose file).
 - **Buyer / seller `message.body`** — even in a **log line** — the **TP1
   privacy** rule applies.
 - **A second `application.yml`** in the `messaging/` repo — the **app** reads
-  its configuration from `../springboot` (one owner per fact, §6.9 editorial).
+  its configuration from the **TP1 repo** (one owner per fact, §6.9 editorial).
 - **No Java in this repo** — `messaging/` ships the **statement**, the
-  **broker compose**, and the **verification `curl`s**; the **java** lives in
-  `../springboot` (like the **Keycloak** `realm/` ships the **realm JSON**).
+  **broker compose**, and the **verification `curl`s**; the **java** lives
+  in the **TP1 repo** (the Spring Boot app, the other repo).
 
 ---
 
