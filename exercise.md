@@ -246,7 +246,7 @@ you write any AMQP code.
    (README §1 → §2).
 3. **Verify** — the Proof below is your checklist.
 
-### Contract (good is when…)
+### Expected behavior
 - `rabbitmq` is **healthy** in `docker compose ps` (`rabbitmq-diagnostics ping` passes).
 - `GET http://localhost:15673/api/overview` → **200** with Basic `listings:listings`; → **401** without.
 - `GET http://localhost:8080/actuator/health` → **200**.
@@ -310,7 +310,7 @@ attached yet** (that is Step 4).
 > anything hand-drawn in the UI. Declared in `RabbitConfig`, the topology
 > re-emerges on every boot — *the topology is code*.
 
-### Contract (good is when…)
+### Expected behavior
 - `GET /api/exchanges?name=listings.direct` → exchange **present**, `type=direct`.
 - `GET /api/queues?name=listings.messages` → `durable=true`, `arguments` contains the **three** `x-dead-letter-*` keys.
 - `GET /api/queues?name=listings.messages.dlq` → `durable=true`, `consumers=0`.
@@ -379,7 +379,7 @@ the seller (the **listing owner**) can read it via
 
 6. **Restart** the app and **verify** with the `curl`s below.
 
-### Contract (good is when…)
+### Expected behavior
 
 **The one rule** — `fromUserId` is **always the caller** (the HTTP-Basic
 identity, **never** the body). `toUserId` is **always explicit**: the
@@ -481,7 +481,7 @@ thread. A **redelivered** message (duplicated `messageId`) is a **no-op**.
 4. **Restart** the app and verify the listener is attached
    (`GET /api/queues?name=listings.messages` → `consumers = 1`).
 
-### Contract (good is when…)
+### Expected behavior
 
 - **`consumers = 1`** on `listings.messages` (with the app up).
 - **After a buyer `POST` (Step 3)**, within ~2 s, `psql SELECT status FROM
@@ -553,7 +553,7 @@ contract.
    those stay "warn-and-ack" per Step 4. The poison rule is: **unexpected**
    or **unparseable** → `basicNack(..., false, false)`.
 
-### Contract (good is when…)
+### Expected behavior
 
 - **Before** the drill: `GET /api/queues?name=listings.messages.dlq` → `ready
   = 0`.
@@ -656,7 +656,7 @@ broker), and the app **does not restart**. When the broker **comes back**, the
 
 4. **Run the drill** (the 6 Proof checks below) to prove it.
 
-### Contract (good is when…)
+### Expected behavior
 
 The 6.1 → 6.7 sequence is the **state machine** of the step. **Every** row
 must hold:
@@ -743,7 +743,7 @@ in `message`. The **unique index + Step 4's upsert** is what makes this work.
    so that 3 different `messageId`s are each **delivered ≥ 2 times** and the
    `message` table has **exactly 3 rows** for them.
 
-### Contract (good is when…)
+### Expected behavior
 
 - For each of the **3 crashed** `messageId`s:
   - **Postgres count = 1** (no duplication), **`status = DELIVERED`**.
@@ -894,7 +894,7 @@ broker.
    `${LISTINGS_MESSAGING_OUTBOX_INTERVAL_MS:5000}`) so the **polling
    interval** is tunable at deploy time.
 
-### Contract (good is when…)
+### Expected behavior
 
 The **8.1 → 8.6** sequence is the **state machine** of the step. **Every**
 row must hold:
@@ -976,7 +976,7 @@ phase). The **5 rows** that must **always** pass on their own:
    `listings`), a `.env` file, a **raw log line** with a buyer's message body,
    **or** a hard-coded **real** password.
 
-### Acceptance checklist
+### Final checks
 
 - [ ] `cd "$TP1_DIR" && docker compose up -d --build` → `docker compose ps` shows **`listings-api`** + **`listings-postgres`** both healthy
 - [ ] `cd "$MSG_DIR" && docker compose up -d` → `docker compose ps` shows **`rabbitmq`** healthy
