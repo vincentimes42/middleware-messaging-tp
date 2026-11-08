@@ -233,12 +233,12 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 
 ## Step 1 — Boot the stack and confirm the connection   CORE
 
-**Goal** — The broker is **healthy**, the TP1 app is **up and connected**,
+**Outcome** — The broker is **healthy**, the TP1 app is **up and connected**,
 `mvn clean verify` stays **green**, and **no queue exists yet** (declared in
 Step 2). This is your **bootstrap**: the 5 checks below must pass **before**
 you write any AMQP code.
 
-### Do — in this order
+### Build it
 
 1. **Apply** the TP1-repo edits (if not already done) — exact code in
    [`README.md` §0](README.md). Without these, the next steps cannot pass.
@@ -253,7 +253,7 @@ you write any AMQP code.
 - `mvn clean verify` in the TP1 repo → **BUILD SUCCESS** (the TP1 smoke test does **not** touch the broker — Postgres only).
 - `GET /api/queues` with credentials → **200, empty list** (queues arrive in Step 2).
 
-### Proof
+### Verify
 
 - [ ] `cd "$MSG_DIR" && docker compose ps` → `rabbitmq` **healthy**
 - [ ] `curl -fsS -u listings:listings http://localhost:15673/api/overview` → **200**; same request **without** `-u` → **401**
@@ -272,13 +272,13 @@ you write any AMQP code.
 
 ## Step 2 - Declare the AMQP topology   CORE
 
-**Goal** — After the app boots, the broker contains **two durable queues**
+**Outcome** — After the app boots, the broker contains **two durable queues**
 (`listings.messages`, `listings.messages.dlq`), **two `direct` exchanges**
 (`listings.direct`, `listings.messages.dlx`), and **two bindings** — all
 **declared by your code**, **idempotent** across restarts, **no consumer
 attached yet** (that is Step 4).
 
-### Do — in this order
+### Build it
 
 1. **Create** the file
    `com.app.listings.messaging.config.RabbitConfig` (`@Configuration`)
@@ -318,7 +318,7 @@ attached yet** (that is Step 4).
 - `docker compose restart rabbitmq` then re-check: the **same** two queues **re-emerge** (durable + persisted in the volume).
 - **No consumer attached** yet (`consumers = 0` on the main queue) — that is Step 4.
 
-### Proof
+### Verify
 
 - [ ] The six `curl`s in [`docs/verification.md` §6](docs/verification.md) all return the expected state
 - [ ] `grep -n "RabbitAdmin\|@Bean.*Queue\|@Bean.*Exchange\|@Bean.*Binding" src/main/java/com/app/listings/messaging/config/RabbitConfig.java` — the file exists and contains **all** six bean definitions
@@ -334,13 +334,13 @@ attached yet** (that is Step 4).
 
 ## Step 3 — Publish: buyer asks, seller not yet online   CORE
 
-**Goal** — A `POST /listings/{id}/messages` from a buyer returns **202
+**Outcome** — A `POST /listings/{id}/messages` from a buyer returns **202
 `SENT`** immediately (the broker **holds** the message), **no consumer is
 required yet** (Step 4 optional), a `message` row shows up in Postgres, and
 the seller (the **listing owner**) can read it via
 `GET /listings/{id}/messages`.
 
-### Do — in this order
+### Build it
 
 1. **Create** the Liquibase change set
    `src/main/resources/db/changelog/v1.1-messages.yaml` — **one** additive
@@ -415,7 +415,7 @@ is not *leaked*; a stranger simply has no view into it.
 > Basic email — rather than derived. This TP keeps the derivation because it
 > is the simplest contract that still fits in one row per turn.)
 
-### Proof
+### Verify
 
 The full matrix (§7) includes all the 401 / 202 / 422 / 404 / GET cases with
 copy-paste `curl`s. The 5 items that must **always** pass on their own:
@@ -438,13 +438,13 @@ copy-paste `curl`s. The 5 items that must **always** pass on their own:
 
 ## Step 4 — Consume, persist, and reply   CORE
 
-**Goal** — The app **registers a `@RabbitListener`** on `listings.messages`;
+**Outcome** — The app **registers a `@RabbitListener`** on `listings.messages`;
 when the broker delivers a published message, the row in `message` is
 **upserted** by `message_id` from `SENT` to `DELIVERED` (with
 `delivered_at=now`); the seller's `GET` now shows **both sides** of the
 thread. A **redelivered** message (duplicated `messageId`) is a **no-op**.
 
-### Do — in this order
+### Build it
 
 1. **Create** a small **DTO** you name, e.g.
    `com.app.listings.messaging.mq.MqMessage` — fields matching the wire
@@ -501,7 +501,7 @@ thread. A **redelivered** message (duplicated `messageId`) is a **no-op**.
   are **rejected** with `requeue=false` → the broker **reroutes** them to
   `listings.messages.dlq` (Step 5 proves this).
 
-### Proof
+### Verify
 
 - [ ] `curl -s -u listings:listings http://localhost:15673/api/queues?name=listings.messages` → `consumers = 1`
 - [ ] Right after a buyer `POST /listings/1/messages`: `docker compose exec listings-postgres psql -U listings -d listings -c "SELECT status FROM message WHERE message_id='<that-uuid>'"` → **`DELIVERED`**
@@ -521,13 +521,13 @@ thread. A **redelivered** message (duplicated `messageId`) is a **no-op**.
 
 ## Step 5 — Poison messages go to the dead-letter queue   CORE
 
-**Goal** — A single **poison** message (a wire JSON the consumer **cannot parse**)
+**Outcome** — A single **poison** message (a wire JSON the consumer **cannot parse**)
 **does not block** legitimate messages on the main queue, and ends up in the
 **`listings.messages.dlq`** where the operator can **inspect it** in the
 management UI. The **producer** is **not touched** — this is a **consumer-side**
 contract.
 
-### Do — in this order
+### Build it
 
 1. **Extend** the `onMessage(...)` signature in
    `com.app.listings.messaging.MessageListener` to take a
@@ -573,7 +573,7 @@ contract.
 - The **producer** (Step 3) is **unchanged**. The DLQ is **purely** on the
   consumer side.
 
-### Proof
+### Verify
 
 Walk it through in 3 commands (from [`docs/verification.md` §9](docs/verification.md)):
 
@@ -609,7 +609,7 @@ Plus:
 
 ## Step 6 — Broker down: the API survives and returns 503   CORE
 
-**Goal** — When the **broker is down**, a `POST /listings/{id}/messages`
+**Outcome** — When the **broker is down**, a `POST /listings/{id}/messages`
 **fails fast** with a **clean 503** (TP1 JSON shape, no stack trace), the **REST
 read** endpoints **keep working** (TP1's listing CRUD is **decoupled** from the
 broker), and the app **does not restart**. When the broker **comes back**, the
@@ -621,7 +621,7 @@ broker), and the app **does not restart**. When the broker **comes back**, the
 > **safety net** for stray publishes outside `MessageService`. Do not assume
 > the 503 remains the contract after Step 8.
 
-### Do — in this order
+### Build it
 
 1. **Add** a runtime exception
    `com.app.listings.messaging.exception.BrokerUnavailableException`
@@ -682,7 +682,7 @@ must hold:
   recycled.
 - The combination is the **entire** value of this step: **degraded, not dead**.
 
-### Proof
+### Verify
 
 - [ ] `docker compose stop rabbitmq` → `docker compose ps` shows `rabbitmq` **exited / Stopped** (not unhealthy / restarting)
 - [ ] `curl -i -u buyer@test:secret123 -X POST http://localhost:8080/listings/1/messages -d '{"body":"still there?"}'` → **503**, body has `"status":503` and a `message` mentioning `rabbitmq` / `broker` / `unavailable`; **not** `500`, **no** stack trace
@@ -707,7 +707,7 @@ must hold:
 
 ## Step 7 — At-least-once delivery and idempotency   BONUS
 
-**Goal** — Prove the **at-least-once** guarantee **in the database**: a
+**Outcome** — Prove the **at-least-once** guarantee **in the database**: a
 **redelivered** message (the broker crashed between `deliver` and `ack`, or
 the consumer crashed **before** ack'ing) does **not** create a **second** row
 in `message`. The **unique index + Step 4's upsert** is what makes this work.
@@ -718,7 +718,7 @@ in `message`. The **unique index + Step 4's upsert** is what makes this work.
   producer is alive).
 - The **broker is up** in this drill — only the **API** is going down.
 
-### Do — in this order
+### Build it
 
 1. **Pre-condition**: `curl -s -u listings:listings http://localhost:15673/api/queues?name=listings.messages` → `consumers ≥ 1` and `ready ≥ 1`. There is at least one **in-flight** message.
 
@@ -765,7 +765,7 @@ in `message`. The **unique index + Step 4's upsert** is what makes this work.
 > also prove "the producer survives the consumer down", keep the API up and
 > stop the **broker** — **that** is Step 6's drill, not Step 7's.
 
-### Proof
+### Verify
 
 - [ ] For **3** distinct in-flight `messageId`s (`M₁, M₂, M₃`), after the 3 crash-recoveries: `SELECT count(*) FROM message WHERE message_id IN ('M₁','M₂','M₃')` → **3**, **not** 6 (no duplication)
 - [ ] For the **same 3**, `GET /api/queues?name=listings.messages` in the management UI shows **`deliveries ≥ 2`** for each (the "at-least-once" evidence)
@@ -784,7 +784,7 @@ in `message`. The **unique index + Step 4's upsert** is what makes this work.
 
 ## Step 8 — Transactional outbox: 202 even when the broker is down   BONUS
 
-**Goal** — **The buyer always gets 202**, **regardless of the broker state**:
+**Outcome** — **The buyer always gets 202**, **regardless of the broker state**:
 `SENT` if the broker is up (the **fast path**, the outbox is **invisible**),
 `PENDING` if the broker is down (the **slow path**, a **`@Scheduled` poller**
 re-publishes from the DB within ~5 s). The **message is never lost** — it
@@ -798,7 +798,7 @@ broker.
 > `@ExceptionHandler(BrokerUnavailableException)` is **kept** as a **safety
 > net** for any stray `convertAndSend` **outside** `MessageService`.
 
-### Do — in this order
+### Build it
 
 1. **Verify** `v1.1-messages.yaml` declared `status` as `VARCHAR(16)` (**not**
    a PG `enum`). If it is a PG enum, **change it** and **re-run** Liquibase
@@ -915,7 +915,7 @@ row must hold:
 > because the **buyer cannot distinguish** a broker outage from a slow
 > consumer (the **UX** is identical).
 
-### Proof
+### Verify
 
 The full 4-phase drill for **§12** — **broker down → 202 PENDING → broker up
 → poller → SENT → DELIVERED** (with copy-paste `psql` snapshots at each
@@ -941,14 +941,14 @@ phase). The **5 rows** that must **always** pass on their own:
 
 ## Step 9 — Final Integration   DELIVERY
 
-**Goal** — The **whole stack** (TP1 base + RabbitMQ + the `com.app.listings
+**Outcome** — The **whole stack** (TP1 base + RabbitMQ + the `com.app.listings
 .messaging` package) **boots cleanly from a clean checkout**: both repos
 `git clone`'d, the broker `docker compose up`'d, the app built with
 `mvn clean package`, the app `docker compose up`'d. The **decision log** is
 **committed** in the TP1 README. The **evaluator can** `curl` a `202 SENT`,
 `psql` a `DELIVERED` row, and **trust** the output.
 
-### Do — in this order
+### Build it
 
 1. **From a fresh clone**, **`git pull`** (or check out your last commit) of
    **both** repos (the TP1 repo **and** this `messaging/` repo).
