@@ -59,7 +59,7 @@ MQ='listings:listings'     # the management API
 > Replace the emails/passwords with **your** TP1 accounts. The management
 > API uses `listings:listings` (the `RABBITMQ_DEFAULT_*` in the compose).
 
-## 4) Step 1 — broker health
+## 5) Step 1 — broker health
 
 ```bash
 # 200 with Basic auth, 401 without
@@ -74,7 +74,7 @@ Expected: first `curl` returns a JSON object (`rabbitmq_version`, …); second �
 curl -fsS http://localhost:8080/actuator/health | python3 -m json.tool
 ```
 
-## 5) Step 2 — the app-declared topology
+## 6) Step 2 — the app-declared topology
 
 ```bash
 # the direct exchange, type=direct
@@ -100,7 +100,7 @@ with `durable: true` **and** an `arguments` object containing
 > rabbitmq && sleep 6` → re-run the two `GET /api/queues` — **both still exist**
 > (the volume persisted them).
 
-## 6) Step 3 — publish (202 SENT, buffered, NOT consumed)
+## 7) Step 3 — publish (202 SENT, buffered, NOT consumed)
 
 ```bash
 # the seller must own listing 1 (create one as SELLER first if not)
@@ -141,7 +141,7 @@ curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST http://localhost:80
 curl -s -o - -w "\n-> HTTP %{http_code}\n" -X POST http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"hi"}'
 ```
 
-## 7) Step 4 — consume + reply (the thread)
+## 8) Step 4 — consume + reply (the thread)
 
 ```bash
 # the SELLER now reads the thread -> should see the BUYER's SENT message
@@ -163,7 +163,7 @@ cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listi
 curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $OTHER http://localhost:8080/listings/1/messages
 ```
 
-## 8) Step 5 — poison → DLQ
+## 9) Step 5 — poison → DLQ
 
 Publish a message that **does not match** the envelope (the consumer cannot
 parse it → rejects with `requeue=false` → broker reroutes to the DLQ):
@@ -196,7 +196,7 @@ docker compose -f "$TP1_DIR/docker-compose.yml" exec listings-postgres psql -U l
 > **Clean the DLQ** (optional, after you have read it): in the UI, or
 > `curl -fsS -u $MQ -X DELETE "http://localhost:15673/api/queues/%2F/listings.messages.dlq"`.
 
-## 9) Step 6 — broker down → 503 (API survives)
+## 10) Step 6 — broker down → 503 (API survives)
 
 ```bash
 # stop ONLY the broker
@@ -220,7 +220,7 @@ Expected: `503` (with a JSON `message` mentioning the broker) while stopped;
 `200` health + `200` GET while stopped; `202` with a **new** `messageId` after
 start.
 
-## 10) Step 7 (bonus) — at-least-once / no duplication
+## 11) Step 7 (bonus) — at-least-once / no duplication
 
 Crash the **consumer** (the API) in the middle of a delivery, then restart —
 the message must be **redelivered** but **not duplicated**.
@@ -245,7 +245,7 @@ cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listi
   -c "SELECT status, count(*) FROM message WHERE listing_id=1 GROUP BY status"
 ```
 
-## 11) Step 8 (bonus) — transactional outbox (202 even broker down)
+## 12) Step 8 (bonus) — transactional outbox (202 even broker down)
 
 ```bash
 cd "$MSG_DIR" && docker compose stop rabbitmq
@@ -263,7 +263,7 @@ cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listi
   -c "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"
 ```
 
-## 12) Stop
+## 13) Stop
 
 ```bash
 cd "$MSG_DIR" && docker compose down          # keep the broker volume
@@ -271,7 +271,7 @@ cd "$TP1_DIR" && docker compose down          # keep the Postgres
 # wipe everything: add -v to either `down`
 ```
 
-## 13) Common issues
+## 14) Common issues
 
 | Symptom | Cause | Fix |
 |---|---|---|

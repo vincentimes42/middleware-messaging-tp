@@ -231,50 +231,51 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 
 
 
-## Step 1 - Bring up the stack (RabbitMQ + the app talking to it) `CORE`
+## Step 1 — Boot the stack and confirm the connection `CORE`
 
-> **User story** — *As a **developer**, I want the **RabbitMQ broker up** and my
-> TP1 app **connected** to it, so that the following steps can publish,
-> buffer, and deliver messages on a broker I can **inspect**.*
+> **Pre-req — the three edits are already applied** (see
+> [`README.md` §0](README.md)): the TP1 repo has the `spring-boot-starter-amqp`
+> in `pom.xml`, the `spring.rabbitmq` block in `application.yml`, and the two
+> `RABBITMQ_HOST`/`RABBITMQ_PORT` env vars in its `docker-compose.yml`.
+> **If they are not there** — do them first, then come back here.
+
+> **User story** — *As a **developer**, I want **RabbitMQ healthy** and the
+> **TP1 app booting cleanly** (connected, no errors), so that I can start
+> publishing and consuming messages in Steps 2-8.*
 
 ### Behavior
 
 | # | Requirement |
 |---|---|
-| 1.1 | After `docker compose up -d` of the **base** and of **this** project, `rabbitmq` reports **healthy** (`rabbitmq-diagnostics ping` passes). There is **no second service** here — RabbitMQ persists to a named volume (`rabbit-data`), not a database. |
-| 1.2 | The **management API** answers: `GET http://localhost:15673/api/overview` returns **200** with the broker's `rabbitmq_version` — **with** Basic auth `listings:listings`, **401** without. |
-| 1.3 | The app boots with the **`spring-boot-starter-amqp`** on the classpath and **connects** to `rabbitmq:5672` (over the network name, not `localhost`). A connection appears in the management UI / `GET /api/connections` once the app has sent its first publish (Step 3). |
-| 1.4 | `mvn clean verify` stays **green** (the TP1 smoke test still boots — it only needs Postgres, so it does **not** require RabbitMQ to be up). |
-
-### Changes to make in the TP1 repo
-
-| What | From (TP1) | To (this step) |
-|---|---|---|
-| `pom.xml` | (no AMQP) | **add** `org.springframework.boot:spring-boot-starter-amqp` — **no version** (Boot 4.1.1 BOM: spring-amqp 4.1.1, rabbitmq-client 5.30.0) |
-| `application.yml` | (none) | **add** the `spring.rabbitmq` block — `host: ${RABBITMQ_HOST:localhost}`, `port: ${RABBITMQ_PORT:5673}`, `username: ${RABBITMQ_USERNAME:listings}`, `password: ${RABBITMQ_PASSWORD:listings}` (Appendix A) |
-| the TP1 repo's `docker-compose.yml` | (no RABBITMQ_*) | **add** to `listings-api.environment`: `RABBITMQ_HOST: "rabbitmq"` and `RABBITMQ_PORT: "5672"` (the **network name** + **internal** port — see the REQUIRED EDIT at the bottom of this **messaging** repo's `docker-compose.yml`) |
+| 1.1 | `rabbitmq` reports **healthy** in `docker compose ps` (`rabbitmq-diagnostics ping` passes). |
+| 1.2 | The management API answers: `GET http://localhost:15673/api/overview` → **200** with Basic `listings:listings`; → **401** without. |
+| 1.3 | The app's actuator health → **200**: `GET http://localhost:8080/actuator/health`. |
+| 1.4 | `mvn clean verify` in the TP1 repo stays **green** (the TP1 smoke test does **not** need the broker — it runs against Postgres only). |
+| 1.5 | **No queue exists yet** in the broker: `GET /api/queues` → **200[]** (empty list). The queues will be declared by your `RabbitConfig` in Step 2. |
 
 ### Acceptance checklist
 
-- [ ] `docker compose ps` (in **both** folders) — `listings-api` **healthy**, `rabbitmq` **healthy**
-- [ ] `curl -fsS -u listings:listings http://localhost:15673/api/overview` → **200** (and the same call **without** `-u` → **401**)
-- [ ] `curl -fsS http://localhost:8080/actuator/health` → **200** (the app boots **with** the AMQP starter on the classpath)
-- [ ] `mvn clean verify` (in the **TP1 repo**) is **green**
-- [ ] **No queue exists yet** — `curl -s -u listings:listings http://localhost:15673/api/queues` → **200** with an **empty** list (the queues are declared by the app in Step 2)
+- [ ] `cd "$MSG_DIR" && docker compose ps` → `rabbitmq` **healthy**
+- [ ] `curl -fsS -u listings:listings http://localhost:15673/api/overview` → **200**; same call **without** `-u` → **401**
+- [ ] `curl -fsS http://localhost:8080/actuator/health` → **200**
+- [ ] `cd "$TP1_DIR" && mvn clean verify` → **BUILD SUCCESS**
+- [ ] `curl -s -u listings:listings http://localhost:15673/api/queues` → **200, empty array** (queues declared in Step 2)
 
 ### Hints
 
-- The full paste-ready config (pom + yml + the base-compose edit) is in
-  **`README.md` → "0) Required base edit"** (the *what* and *why* is in
-  **Appendix A**).
-- **Network name, not localhost:** from inside the `listings-api` container,
-  `localhost` is the container **itself**, so the AMQP target **must** be the
-  network name `rabbitmq` on its **internal** port `5672` (host port `5673` is
-  only for *your* curl). The rule is the same everywhere: from inside a
-  container, reach the other service by its network name, not `localhost`.
-- The broker **persists** to a named volume (`rabbit-data`), so `docker
-  compose down` (without `-v`) keeps the queue state.
-- Verify: [`docs/verification.md` §4](docs/verification.md).
+- If `rabbitmq` is **restarting** or **unhealthy**, check `docker
+  compose -f <path-to-messaging-compose> logs rabbitmq` (the broker persists
+  to the named volume `rabbit-data`; `docker compose down -v` wipes it).
+- If the app **fails to start** because it cannot find RabbitMQ, check that
+  `RABBITMQ_HOST=rabbitmq` and `RABBITMQ_PORT=5672` are in the **TP1 repo's**
+  `docker-compose.yml` (README §0, edit c). Remember: from inside the
+  container, the broker is `rabbitmq:5672` (internal port), **not**
+  `localhost:5673` (host port).
+- Start the **broker before the app** (README §1 → §2). If the app boots
+  first, it will retry in the background — it will still find the broker
+  eventually, but the cleanest sequence is RabbitMQ → app.
+- The exact commands are in [`docs/verification.md` §5](docs/verification.md)
+  (broker health + app actuator).
 
 ---
 
@@ -324,7 +325,7 @@ manually with `curl`, `psql`, and the management UI — not by a test.
 - The **DLQ** is a **plain** durable queue (no dead-letter arguments of its own — it **is** the dead-letter sink).
 - The **DLX** is a **separate** `direct` exchange named `listings.messages.dlx` (not the same as `listings.direct`).
 - Two `@Bean Binding`s: exchange→main (routing key `listings.messages`), and DLX→DLQ (routing key `listings.messages.dlq`).
-- Verify: [`docs/verification.md` §5](docs/verification.md) — six copy-paste `curl`s.
+- Verify: [`docs/verification.md` §6](docs/verification.md) — six copy-paste `curl`s.
 
 
 ## Step 3 - Publish: buyer asks, seller not yet online `CORE`
@@ -418,7 +419,7 @@ is rejected (`422`).
 - **The 202 happens BEFORE the consumer sees the message.** The broker **holds** it. This is **not** a synchronous call to any other Java code — it is a **network write to RabbitMQ**.
 - The **`body`** of the wire message is a **JSON string** (Jackson `ObjectMapper`), with the envelope in `Conventions`. The **`toUserId`** is resolved from the **listing's owner** at publish time and written **in the body**, so the consumer does not need to re-lookup the listing.
 - For the **thread read**, a simple `findByListingIdAndFromUserIdOrToUserId(...)` is sufficient — or **two** repository calls and a union.
-- `docs/verification.md` §6 walks all the 202/404/422/401 cases with copy-paste `curl`s.
+- `docs/verification.md` §7 walks all the 202/404/422/401 cases with copy-paste `curl`s.
 
 ---
 
@@ -478,7 +479,7 @@ is rejected (`422`).
   (a buyer that no longer exists, an orphan `inReplyTo`) — those are **logged
   and swallowed**, so the **ack** is safe. **Do** let **unexpected** errors
   bubble — that is the contract Step 5's proof (DLQ) depends on.
-- `docs/verification.md` §7 walks the full **reply round-trip** — buyer POST,
+- `docs/verification.md` §8 walks the full **reply round-trip** — buyer POST,
   seller POST-inReplyTo, both `GET`s.
 
 
@@ -504,7 +505,7 @@ is rejected (`422`).
 
 ### Acceptance checklist
 
-- [ ] **Poison drill** (from [`docs/verification.md` §8](docs/verification.md)):
+- [ ] **Poison drill** (from [`docs/verification.md` §9](docs/verification.md)):
   - `POST http://localhost:15673/api/exchanges/listings.direct/%2F/publish?routing_key=listings.messages&exchange=listings.direct` with a **body** whose JSON **does not** match the `MqMessage` envelope (e.g. `{"oops":true}`) and **routing key** `listings.messages` → **200** (the broker accepts it — it is routed to the **main** queue, where the **consumer** then rejects it and the broker moves it to the **DLQ**)
   - A **few seconds later**, `GET /api/queues?name=listings.messages` → `ready` is **+0 or -1** (the message **did not stay** in the main queue indefinitely, or it is **still 1** if the consumer has not yet rejected it — either is **correct** depending on timing)
   - `GET /api/queues?name=listings.messages.dlq` → `ready` = **+1** (or more) — the poison **landed** in the DLQ
@@ -534,7 +535,7 @@ is rejected (`422`).
   requeued **3 times** to the DLQ. The **consumer-side** `basicNack` is for
   **deciding on your own** (e.g. an **unparseable** body — the **broker**
   cannot see that — to say "move it now").
-- `docs/verification.md` §8 gives the **exact** 3 `curl`s (poison publish,
+- `docs/verification.md` §9 gives the **exact** 3 `curl`s (poison publish,
   then the two `GET /api/queues`) and the **expected** output.
 
 ---
@@ -600,7 +601,7 @@ is rejected (`422`).
   outage, the **202 path** will always use a **fresh** UUID, **not** a **retry**
   of a previous one. Do **not** try to **replay** a previous `messageId` across
   a stop/start cycle.
-- `docs/verification.md` §9 is the full **stop → 503 → start → 202** sequence,
+- `docs/verification.md` §10 is the full **stop → 503 → start → 202** sequence,
   with the **expected** response bodies.
 
 ---
@@ -656,7 +657,7 @@ is rejected (`422`).
   (`rabbit-data` is **named**, so it **survives** the stop). The **durable**
   queue is **persisted** in that volume. **`down -v`** **would** wipe it
   (do **not** run that mid-drill, or you lose the evidence).
-- `docs/verification.md` §10 (if you do this step) is the **exact** sequence,
+- `docs/verification.md` §11 (if you do this step) is the **exact** sequence,
   with the **pre/post** `psql` snapshots.
 
 ---
@@ -715,7 +716,7 @@ is rejected (`422`).
 - The **`UPDATE`-before-`convertAndSend`** is the **atomic claim** — **do not** `convertAndSend` first and then `UPDATE` (the **2nd** instance would **also** see `PENDING` and **also** publish → **doubling**).
 - The **`WHERE status = 'PENDING'`** is the **guard** — **not** `WHERE message_id = ?`. Both are **correct**; the **`message_id`** is the **PK** and the **`status`** is the **guard** (the **PK** check would be **redundant** if the `status` check is there).
 - The **`UPDATE`** is **`int affected = repo.updateClaim(id);`** — if **`affected == 0`**, **another** instance **won** the **race**; **do not** publish. **If** `affected == 1`, **`convertAndSend`**.
-- `docs/verification.md` §11 (if you do this step) is the **full** sequence: **stop → 202 PENDING → start → poller → SENT → DELIVERED**.
+- `docs/verification.md` §12 (if you do this step) is the **full** sequence: **stop → 202 PENDING → start → poller → SENT → DELIVERED**.
 
 ---
 
