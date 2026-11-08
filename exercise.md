@@ -24,7 +24,7 @@ REST endpoint and the RabbitMQ **management API**), a read of the **Postgres**
 `message` table, the **management UI** (queue `ready` count, exchanges,
 bindings, the DLQ), and a **grep of your own Java** — **not** with a Java test
 suite (writing tests is optional and not part of the deliverable). The per-step
-`Acceptance checklist` **is** the "definition of done". Every command you need
+`Verify` (Step 9: `Final checks`) **is** the "definition of done". Every command you need
 is copy-pasteable in [`docs/verification.md`](docs/verification.md). The
 **code** lives in **your Spring Boot (TP1) repo** (a new
 `com.app.listings.messaging` package); **this repo** (`messaging/`) only owns
@@ -135,7 +135,7 @@ it, the seller can read it).
 | **Bonus** (start only when the core is green) | 7 (at-least-once / redelivery) · 8 (transactional outbox) | ~1h45 |
 | **Delivery** | 9 (final integration) | ~0h15 |
 
-Each core step's `Acceptance checklist` is your "definition of done".
+Each core step's `Verify` section is your "definition of done".
 Bonus steps have their own checklists; doing them is optional but counts for
 the grade if you deliver them.
 
@@ -223,7 +223,7 @@ levels that fit this TP are:
   context boots, the `RabbitAdmin` bean is present, the `@RabbitListener` is
   registered. That is it.
 
-The **Acceptance checklist** of each step is the contract. It is verified
+The **Verify** section of each step is the contract. It is verified
 manually with `curl`, `psql`, and the management UI — not by a test.
 
 
