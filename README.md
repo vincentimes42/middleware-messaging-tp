@@ -15,6 +15,7 @@ Two repos are involved:
 ## Prerequisites
 
 - **TP1 is done and green** (register, CRUD, ownership, `?version=V1|V2`).
+- Linux or WSL2, Bash terminal ([details](../springboot/README.md#operating-system-and-shell)).
 - Docker + Docker Compose (`docker compose version`).
 - JDK 27 + Maven 3.9+ (already installed for TP1).
 - **Ports free on the host:** `8080` (API, unchanged) · `5435` (Postgres) ·
@@ -149,19 +150,20 @@ messaging/
 ├── exercise.md
 ├── docker-compose.yml
 └── docs/
+    ├── primer.md
     └── verification.md
 
 springboot/  (your TP1 repo — you add the messaging package here)
 ├── pom.xml                              # + spring-boot-starter-amqp
 ├── src/main/resources/application.yml   # + spring.rabbitmq block
-├── src/main/resources/db/changelog/v1.2-messages.yaml   # [Step 3] + include in the master
+├── src/main/resources/db/changelog/v1.2-messages.yaml   # [Step 3a] + include in the master
 ├── docker-compose.yml                   # + RABBITMQ_HOST / PORT
 └── src/main/java/com/app/listings/messaging/
     ├── RabbitConfig.java                # [Step 2]
-    ├── MessageEntity.java               # [Step 3]
-    ├── MessageRepository.java           # [Step 3-4]
-    ├── MessageService.java              # [Step 3, 6]
-    ├── MessageController.java           # [Step 3]
+    ├── MessageEntity.java               # [Step 3a]
+    ├── MessageRepository.java           # [Step 3a-4]
+    ├── MessageService.java              # [Step 3a, 6]
+    ├── MessageController.java           # [Step 3a-3b]
     ├── MessageListener.java             # [Step 4-5]
     └── BrokerUnavailableException.java  # [Step 6]
 ```
