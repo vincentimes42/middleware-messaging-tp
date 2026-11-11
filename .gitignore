@@ -1,33 +1,34 @@
 # ------------------------------------------------------------------
 #  TP Messaging — .gitignore
 # ------------------------------------------------------------------
-# This repo ships NO Java (it lives in the TP1 Spring Boot repo), and the
-# data lives on the named volume `rabbit-data` — so there is little to
-# ignore. Only local scratch and OS cruft.
 
-# Local data / secrets
-*.env
-.env
-.env.*
-*.local
+# No Java here (it lives in the TP1 repo) and the broker data lives on the
+# named volume `rabbit-data`: only local scratch is ignored.
 *.db
 *.sqlite
 
-# Ad-hoc scratch / shell-redirect output (e.g. `docker compose ... 2> err.txt`)
-/err*.txt
-/out*.txt
+# --- Secrets and local env (the Gemini key lives in the shell only) ---
+.env
+.env.*
+*.env
+*.local
 
-# IDE
+# --- IDE ---
 .idea/
-.vscode/
 *.iml
+*.ipr
+*.iws
+.vscode/
 .classpath
 .project
 .settings/
+.factorypath
 
-# OS
+# --- Logs and ad-hoc shell-redirect output (e.g. `... 2> err.txt`) ---
+*.log
+/err*.txt
+/out*.txt
+
+# --- OS ---
 .DS_Store
 Thumbs.db
-
-# logs (tail output, etc.)
-*.log
