@@ -1,284 +1,257 @@
 # Messaging — stack verification
 
-Goal: prove, step by step, that the broker is up, the **topology is declared
-by the app**, a **202 SENT** is **buffered** (not consumed), a **consumer**
-drains it to `DELIVERED`, a **poison** lands in the **DLQ**, and a **broker
-outage** is a clean **503**. Everything here is **copy-pasteable**.
+Copy-pasteable commands for every `Verify` section of
+[`../exercise.md`](../exercise.md): the broker is up, the **topology is
+declared by the app**, a **202 SENT** is **buffered**, a **consumer** drains
+it to `DELIVERED`, a **poison** lands in the **DLQ**, and a **broker outage**
+is a clean **503**.
 
-> **Prereq:** the TP1 app (your `springboot` repo) is up at
-> `http://localhost:8080`, **TP1 is green**, and you have **two** TP1
-> accounts (e.g. `buyer@test` and `seller@test`) plus **one more**
-> (e.g. `carol@test`) for the non-participant cases. Create them with
-> TP1's `POST /auth/register`.
->
-> **Paths:** the commands below use two variables (set them once in the
-> terminal, see the "Paths" box below).
+> **Prerequisite:** TP1 is green and up on `http://localhost:8080`, with the
+> TP1 accounts `alice@test.org` (owner of listing `1`), `bob@test.org`
+> (buyer), and `carol@test.org` (non-participant), password `secret123`
+> (TP1 `docs/verification.md` §4 creates alice and bob; register carol the
+> same way).
 
-## 1) Prereqs and ports
+## 1) Ports
 
 | Host port | Service | Notes |
 |---|---|---|
 | `8080` | `listings-api` | TP1 (unchanged) |
 | `5435` | `listings-postgres` | TP1 (unchanged) |
 | `5673` | `rabbitmq` (AMQP) | internal `5672` |
-| `15673` | `rabbitmq` (management) | internal `15672` — the UI + the `curl` target |
-
-Broker login (both the UI and the API): **`listings`** / **`listings`**.
+| `15673` | `rabbitmq` (management) | internal `15672` — the UI and the `curl` target |
 
 ## 2) Start
 
 ```bash
-# 1) RabbitMQ first (the app connects to it on boot — broker must be up first)
-cd "$MSG_DIR" && docker compose up -d
-docker compose ps                              # rabbitmq healthy
-
-# 2) then the TP1 app (rebuild to pick up the starter + edits from README §0)
-cd "$TP1_DIR" && docker compose up -d --build
+cd "$MSG_DIR" && docker compose up -d          # 1) the broker first
+docker compose ps                               # rabbitmq healthy
+cd "$TP1_DIR" && docker compose up -d --build   # 2) then the app (README §0 edits applied)
 curl -fsS http://localhost:8080/actuator/health
 ```
 
-## 3) Set the two repo paths (once per terminal)
-
-The commands below target your **two repos** by the `TP1_DIR` and `MSG_DIR`
-variables (your two repo folders can be **named** anything — the commands do **not** assume a relative path):
+## 3) Variables and helpers (once per terminal)
 
 ```bash
-export TP1_DIR="/path/to/your-tps1-repo"     # the Spring Boot app repo
-export MSG_DIR="/path/to/messaging-repo"     # this messaging repo
+export TP1_DIR="/path/to/your-tp1-repo"        # the Spring Boot app repo
+export MSG_DIR="/path/to/messaging-repo"       # this repo
+API=http://localhost:8080
+MGMT=http://localhost:15673/api
+MQ='listings:listings'                         # management API credentials
+SELLER='alice@test.org:secret123'              # owner of listing 1
+BUYER='bob@test.org:secret123'
+OTHER='carol@test.org:secret123'
+JSON='Content-Type: application/json'
+
+# one queue (NB: /api/queues?name=… does NOT filter: always use the path form).
+# The management counters (ready, unacked) are refreshed every ~5 s: wait ~6 s
+# after an action before reading them.
+queue() { curl -fsS -u $MQ "$MGMT/queues/%2F/$1" | python3 -c '
+import sys, json; q = json.load(sys.stdin)
+print(q["name"], "| type", q["type"], "| ready", q["messages_ready"],
+      "| unacked", q["messages_unacknowledged"], "| consumers", q["consumers"])'; }
+# publish a raw payload to listings.direct with the main routing key
+publish() { curl -fsS -u $MQ -X POST "$MGMT/exchanges/%2F/listings.direct/publish" -H "$JSON" \
+  -d "$(python3 -c 'import json,sys; print(json.dumps({"properties":{"delivery_mode":2},"routing_key":"listings.messages","payload":sys.argv[1],"payload_encoding":"string"}))' "$1")"; echo; }
+sql() { (cd "$TP1_DIR" && docker compose exec -T listings-postgres psql -U listings -d listings -c "$1"); }
 ```
 
-## 4) The login credentials (used in every curl below)
+## 4) Listing 1 belongs to alice
 
 ```bash
-BUYER='buyer@test:secret123'
-SELLER='seller@test:secret123'
-OTHER='carol@test:secret123'
-MQ='listings:listings'     # the management API
+curl -fsS -u $SELLER "$API/listings/1" | python3 -m json.tool
+# if missing, create it as alice (TP1 Step 2):
+# curl -fsS -u $SELLER -X POST "$API/listings" -H "$JSON" -d '{"title":"Bike","price":350,"category":"SPORTS"}'
 ```
-
-> Replace the emails/passwords with **your** TP1 accounts. The management
-> API uses `listings:listings` (the `RABBITMQ_DEFAULT_*` in the compose).
 
 ## 5) Step 1 — broker health
 
 ```bash
-# 200 with Basic auth, 401 without
-curl -fsS -u $MQ http://localhost:15673/api/overview | python3 -m json.tool | head -8
-curl -s  -o /dev/null -w "no-auth -> HTTP %{http_code}\n" http://localhost:15673/api/overview
-```
-
-Expected: first `curl` returns a JSON object (`rabbitmq_version`, …); second →
-**HTTP 401**.
-
-```bash
-curl -fsS http://localhost:8080/actuator/health | python3 -m json.tool
+curl -fsS -u $MQ "$MGMT/overview" | python3 -c 'import sys,json; print("rabbitmq", json.load(sys.stdin)["rabbitmq_version"])'
+curl -s -o /dev/null -w "no-auth -> HTTP %{http_code}\n" "$MGMT/overview"      # 401
+curl -fsS "$API/actuator/health"                                                # {"status":"UP"...}
+curl -fsS -u $MQ "$MGMT/queues" | python3 -c 'import sys,json; print([q["name"] for q in json.load(sys.stdin)])'   # [] before Step 2
 ```
 
 ## 6) Step 2 — the app-declared topology
 
 ```bash
-# the direct exchange, type=direct
-curl -fsS -u $MQ "http://localhost:15673/api/exchanges?name=listings.direct" | python3 -m json.tool
+for x in listings.direct listings.messages.dlx; do
+  curl -fsS -u $MQ "$MGMT/exchanges/%2F/$x" | python3 -c 'import sys,json; e=json.load(sys.stdin); print(e["name"], e["type"], "durable", e["durable"])'
+done
+queue listings.messages            # type quorum
+queue listings.messages.dlq        # type classic, consumers 0
+curl -fsS -u $MQ "$MGMT/queues/%2F/listings.messages" | python3 -c 'import sys,json; print(json.load(sys.stdin)["arguments"])'
+# expected: x-queue-type quorum, x-delivery-limit 3, x-dead-letter-exchange, x-dead-letter-routing-key
 
-# the two durable queues + their dead-letter arguments
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" | python3 -m json.tool
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages.dlq" | python3 -m json.tool
+# bindings (routing key -> queue)
+for x in listings.direct listings.messages.dlx; do
+  curl -fsS -u $MQ "$MGMT/exchanges/%2F/$x/bindings/source" \
+    | python3 -c 'import sys,json; [print(b["source"], "--", b["routing_key"], "->", b["destination"]) for b in json.load(sys.stdin)]'
+done
 
-# the binding exchange -> main (routing key = listings.messages)
-# bindings of the `listings.direct` exchange (vhost = `/`, the default)
-curl -fsS -u $MQ "http://localhost:15673/api/exchanges/listings.direct/bindings/queue" \
-  | python3 -c 'import sys,json; [print(b["veto"],b["routing_key"],b["destination"]) for b in json.load(sys.stdin)]'
+# durability: restart the broker, the queues are still there
+(cd "$MSG_DIR" && docker compose restart rabbitmq) && sleep 15
+queue listings.messages; queue listings.messages.dlq
 ```
 
-Expected: exchange `listings.direct` (`type: direct`); queue `listings.messages`
-with `durable: true` **and** an `arguments` object containing
-`x-dead-letter-exchange`, `x-dead-letter-routing-key`,
-`x-dead-letter-exchange-type`; queue `listings.messages.dlq` (`durable: true`,
-`consumers: 0`).
+## 7) Step 3 — publish (202 SENT)
 
-> **Durable check:** `docker compose -f "$MSG_DIR/docker-compose.yml" restart
-> rabbitmq && sleep 6` → re-run the two `GET /api/queues` — **both still exist**
-> (the volume persisted them).
-
-## 7) Step 3 — publish (202 SENT, buffered, NOT consumed)
+Before Step 4 exists (no consumer yet):
 
 ```bash
-# the seller must own listing 1 (create one as SELLER first if not)
-curl -fsS -u $SELLER -X POST http://localhost:8080/listings \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"Bike","description":"road bike","price":350,"category":"SPORTS"}'
-
-# BUYER posts a question -> 202
-resp=$(curl -fsS -u $BUYER -X POST http://localhost:8080/listings/1/messages \
-  -H 'Content-Type: application/json' -d '{"body":"Is this still available?"}')
-echo "$resp"
+resp=$(curl -fsS -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"Is this still available?"}')
+echo "$resp"                                                 # {"messageId":"<uuid>","status":"SENT"}
 MID=$(echo "$resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["messageId"])')
-echo "messageId=$MID"
+queue listings.messages                                      # ready >= 1, consumers 0
+sql "SELECT message_id, from_user_id, to_user_id, status FROM message WHERE message_id='$MID'"
 ```
 
-Expected: `202`, body `{"messageId":"<uuid>","status":"SENT"}`.
+Error contracts:
 
 ```bash
-# still sitting in the broker (not consumed)
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
-  | python3 -c 'import sys,json; q=json.load(sys.stdin)[0]; print("ready =",q["messages_ready"],"consumers =",q["consumers"])'
-
-# the DB row is SENT (the 202 happened before any consume)
-cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
-  -c "SELECT message_id, from_user_id, to_user_id, status FROM message WHERE message_id='$MID'"
+code() { curl -s -o /dev/null -w "%{http_code}\n" "$@"; }
+code -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"hi"}'                                  # 401
+code -u $BUYER -X POST "$API/listings/99999/messages" -H "$JSON" -d '{"body":"hi"}'                    # 404
+code -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":""}'                          # 422
+code -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" \
+  -d '{"body":"hi","inReplyTo":"00000000-0000-0000-0000-000000000000"}'                                # 422
+code -u $SELLER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"to myself"}'               # 422
+code -u $OTHER "$API/listings/1/messages"                                                              # 200 (empty list)
+curl -fsS -u $SELLER "$API/listings/1/messages" | python3 -m json.tool                                 # full thread
 ```
 
-Expected: `ready = 1`, `consumers = 0` (Step 3 alone); DB row `status = SENT`.
-
-### 6a) Step 3 — the error contracts
+## 8) Step 4 — consume + reply
 
 ```bash
-# 422 self-message (buyer posting on a listing the BUYER owns)
-# 422 bad inReplyTo, 422 empty body, 404 unknown listing, 401 anonymous:
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST http://localhost:8080/listings/99999/messages -H 'Content-Type: application/json' -d '{"body":"hi"}'
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"hi","inReplyTo":"00000000-0000-0000-0000-000000000000"}'
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":""}'
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -X POST http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"hi"}'
+sleep 6; queue listings.messages                             # consumers 1, ready back to 0
+sql "SELECT status, delivered_at FROM message WHERE message_id='$MID'"   # DELIVERED
+
+# the seller replies to the buyer
+curl -fsS -u $SELLER -X POST "$API/listings/1/messages" -H "$JSON" \
+  -d "{\"body\":\"Yes, still available\",\"inReplyTo\":\"$MID\"}"; echo
+sleep 2
+curl -fsS -u $BUYER "$API/listings/1/messages" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d), "turns:", [m.get("body") for m in d])'   # 2 turns
+
+# duplicate delivery: re-publish the exact envelope of $MID -> still one row
+ENV=$(sql "SELECT json_build_object('messageId',message_id,'listingId',listing_id,'fromUserId',from_user_id,'toUserId',to_user_id,'inReplyToMessageId',in_reply_to,'body',body,'sentAt',sent_at) FROM message WHERE message_id='$MID'" | sed -n 3p)
+publish "$ENV"; sleep 2
+sql "SELECT count(*) FROM message WHERE message_id='$MID'"                # 1
+(cd "$TP1_DIR" && docker compose logs --since 2m listings-api | grep -iE "warn|exception" | tail -5)
 ```
 
-## 8) Step 4 — consume + reply (the thread)
-
-```bash
-# the SELLER now reads the thread -> should see the BUYER's SENT message
-curl -fsS -u $SELLER http://localhost:8080/listings/1/messages | python3 -m json.tool
-
-# SELLER replies (inReplyTo = the buyer's messageId)
-curl -fsS -u $SELLER -X POST http://localhost:8080/listings/1/messages \
-  -H 'Content-Type: application/json' -d "{\"body\":\"Yes, still available!\",\"inReplyTo\":\"$MID\"}"
-
-# sleep for the @RabbitListener to drain, then the BUYER reads the full thread
-sleep 3
-curl -fsS -u $BUYER http://localhost:8080/listings/1/messages | python3 -m json.tool
-
-# DB: every row is DELIVERED now
-cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
-  -c "SELECT to_char(sent_at at time zone 'UTC' as 'HH24:MI:SS'), from_user_id, to_user_id, status FROM message WHERE listing_id=1 ORDER BY sent_at"
-
-# a NON-participant sees an EMPTY thread (not 403)
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $OTHER http://localhost:8080/listings/1/messages
-```
+Adapt the column names in the `json_build_object` to your changelog if they
+differ (`in_reply_to` / `in_reply_to_message_id`).
 
 ## 9) Step 5 — poison → DLQ
 
-Publish a message that **does not match** the envelope (the consumer cannot
-parse it → rejects with `requeue=false` → broker reroutes to the DLQ):
-
 ```bash
-# publish a "bogus" body to the main exchange with the main routing key
-curl -fsS -u $MQ -X POST \
-  "http://localhost:15673/api/exchanges/listings.direct/%2F/publish?routing_key=listings.messages&exchange=listings.direct" \
-  -H 'content-type: application/json' \
-  -d '{"bogus":true,"noMessageId":"x"}' -o /dev/null -w "publish poison -> HTTP %{http_code}\n"
+queue listings.messages.dlq                                  # note the ready count
+publish '{"oops":true}'                                      # {"routed":true}
+sleep 6                                                      # counters lag ~5 s
+queue listings.messages                                      # ready 0 (not stuck)
+queue listings.messages.dlq                                  # ready +1
 
-sleep 3
-# main queue: ready did NOT grow (the poison is not a legitimate business row)
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
-  | python3 -c 'import sys,json; q=json.load(sys.stdin)[0]; print("main ready =",q["messages_ready"])'
-# DLQ: the poison landed here
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages.dlq" \
-  | python3 -c 'import sys,json; q=json.load(sys.stdin)[0]; print("dlq ready =",q["messages_ready"])'
-# peek the dead message body (read-only)
-curl -fsS -u $MQ "http://localhost:15673/api/queues/%2F/listings.messages.dlq/get?count=1" | python3 -m json.tool
+# peek the dead message (stays in the DLQ)
+curl -fsS -u $MQ -X POST "$MGMT/queues/%2F/listings.messages.dlq/get" -H "$JSON" \
+  -d '{"count":5,"ackmode":"ack_requeue_true","encoding":"auto"}' \
+  | python3 -c 'import sys,json; [print(m["payload"], "| x-death:", [(d["queue"], d["reason"]) for d in m["properties"].get("headers",{}).get("x-death",[])]) for m in json.load(sys.stdin)]'
+# expected: {"oops":true} | x-death: [('listings.messages', 'rejected')]
 
-# a legit message AFTER the poison still processes (queue not blocked)
-curl -fsS -u $BUYER -X POST http://localhost:8080/listings/1/messages \
-  -H 'Content-Type: application/json' -d '{"body":"after the poison, still here?"}' >/dev/null
+# a legitimate message afterwards is still processed
+curl -fsS -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"after the poison"}'; echo
 sleep 2
-docker compose -f "$TP1_DIR/docker-compose.yml" exec listings-postgres psql -U listings -d listings \
-  -c "SELECT count(*) AS delivered FROM message WHERE status='DELIVERED'"
+sql "SELECT status, count(*) FROM message GROUP BY status"   # no SENT left
+(cd "$TP1_DIR" && docker compose logs --since 2m listings-api | grep -c "unknown delivery tag")   # 0
+
+# optional: empty the DLQ after reading it
+# curl -fsS -u $MQ -X DELETE "$MGMT/queues/%2F/listings.messages.dlq/contents"
 ```
 
-> **Clean the DLQ** (optional, after you have read it): in the UI, or
-> `curl -fsS -u $MQ -X DELETE "http://localhost:15673/api/queues/%2F/listings.messages.dlq"`.
-
-## 10) Step 6 — broker down → 503 (API survives)
+## 10) Step 6 — broker down → 503
 
 ```bash
-# stop ONLY the broker
-cd "$MSG_DIR" && docker compose stop rabbitmq
+(cd "$MSG_DIR" && docker compose stop rabbitmq)
+BEFORE=$(sql "SELECT count(*) FROM message" | sed -n 3p)
 
-# publish -> 503 (clean, not 500, not a hang)
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST \
-  http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"still there?"}'
+curl -s -w "\n-> HTTP %{http_code} in %{time_total}s\n" -u $BUYER -X POST "$API/listings/1/messages" \
+  -H "$JSON" -d '{"body":"still there?"}'                    # 503, TP1 JSON shape, a few seconds
+AFTER=$(sql "SELECT count(*) FROM message" | sed -n 3p)
+echo "rows before=$BEFORE after=$AFTER (expect equal)"
 
-# the API is ALIVE and the other TP1 paths are fine
-curl -s -o /dev/null -w "actuator health -> HTTP %{http_code}\n" http://localhost:8080/actuator/health
-curl -s -o /dev/null -w "GET /listings     -> HTTP %{http_code}\n" -u $BUYER http://localhost:8080/listings
+for e in health/liveness health; do curl -s -o /dev/null -w "/actuator/$e -> %{http_code}\n" "$API/actuator/$e"; done
+# expected: liveness 200 ; health 503 (rabbit DOWN)
+curl -s -o /dev/null -w "GET /listings -> %{http_code}\n" "$API/listings"   # 200
 
-# recover
-docker compose start rabbitmq && sleep 6
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST \
-  http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"back?"}'
+(cd "$MSG_DIR" && docker compose start rabbitmq)
+until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 10
+curl -s -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"back?"}'   # 202
+queue listings.messages                                      # consumers 1 again
+sql "SELECT status, count(*) FROM message GROUP BY status"   # all DELIVERED
 ```
 
-Expected: `503` (with a JSON `message` mentioning the broker) while stopped;
-`200` health + `200` GET while stopped; `202` with a **new** `messageId` after
-start.
+## 11) Step 7 (bonus) — duplicates and redelivery
 
-## 11) Step 7 (bonus) — at-least-once / no duplication
-
-Crash the **consumer** (the API) in the middle of a delivery, then restart —
-the message must be **redelivered** but **not duplicated**.
+Duplicate drill (deterministic): §8 above, last block, publishing the same
+envelope **3 times**:
 
 ```bash
-# one in-flight message, then kill the app before ack
-curl -fsS -u $BUYER -X POST http://localhost:8080/listings/1/messages \
-  -H 'Content-Type: application/json' -d '{"body":"in flight?"}' >/dev/null
-cd "$TP1_DIR" && docker compose stop listings-api     # broker KEEPS it (durable)
-
-# the queue still holds it (ready=1), 0 delivered
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
-  | python3 -c 'import sys,json;q=json.load(sys.stdin)[0];print("ready =",q["messages_ready"],"consumers =",q["consumers"])'
-
-# restart the consumer -> it drains, deliveries counter shows >= 2 (at-least-once)
-cd "$TP1_DIR" && docker compose up -d listings-api && sleep 6
-curl -fsS -u $MQ "http://localhost:15673/api/queues?name=listings.messages" \
-  | python3 -c 'import sys,json;q=json.load(sys.stdin)[0];print("ready =",q["messages_ready"],"deliveries =",q["deliveries_total"])'
-
-# NO duplication: exactly the expected number of rows (not double)
-cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
-  -c "SELECT status, count(*) FROM message WHERE listing_id=1 GROUP BY status"
+for i in 1 2 3; do publish "$ENV"; done; sleep 2
+sql "SELECT count(*), max(status) FROM message WHERE message_id='$MID'"   # 1 | DELIVERED
 ```
 
-## 12) Step 8 (bonus) — transactional outbox (202 even broker down)
+Crash drill: a burst of valid envelopes, the API killed in the middle.
 
 ```bash
-cd "$MSG_DIR" && docker compose stop rabbitmq
-# with the outbox enabled (Steps 8), the publish is 202 PENDING, not 503
-curl -s -o - -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST \
-  http://localhost:8080/listings/1/messages -H 'Content-Type: application/json' -d '{"body":"queued while down?"}'
+OWNER=$(sql "SELECT to_user_id FROM message WHERE message_id='$MID'" | sed -n 3p)
+FROM=$(sql "SELECT from_user_id FROM message WHERE message_id='$MID'" | sed -n 3p)
+( for i in $(seq 1 300); do
+    publish "{\"messageId\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"listingId\":1,\"fromUserId\":$FROM,\"toUserId\":$OWNER,\"inReplyToMessageId\":null,\"body\":\"burst $i\",\"sentAt\":\"$(date -u +%FT%TZ)\"}" >/dev/null
+  done ) &
+sleep 3; (cd "$TP1_DIR" && docker compose kill listings-api); wait
+queue listings.messages                                      # ready > 0: the rest of the burst waits
+(cd "$TP1_DIR" && docker compose start listings-api); sleep 20
 
-# the row is PENDING in the DB (not in the broker)
-cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
-  -c "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"
+sql "SELECT message_id FROM message GROUP BY message_id HAVING count(*) > 1"   # 0 rows
+(cd "$TP1_DIR" && docker compose logs listings-api | grep -c "redelivered=true")   # >= 1 (else retry with a larger burst)
+(cd "$TP1_DIR" && docker compose logs listings-api | grep -ciE "duplicate key")    # 0
+```
 
-# start the broker -> the poller claims + publishes -> SENT -> DELIVERED
-cd "$MSG_DIR" && docker compose start rabbitmq && sleep 10
-cd "$TP1_DIR" && docker compose exec listings-postgres psql -U listings -d listings \
-  -c "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"
+## 12) Step 8 (bonus) — transactional outbox
+
+```bash
+(cd "$MSG_DIR" && docker compose stop rabbitmq)
+curl -s -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"queued while down?"}'
+# 202 with "status":"PENDING"
+sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # PENDING
+
+(cd "$MSG_DIR" && docker compose start rabbitmq)
+until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 15
+sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # SENT, then DELIVERED
+sql "SELECT count(*) FROM message WHERE status='PENDING'"                     # 0
 ```
 
 ## 13) Stop
 
 ```bash
 cd "$MSG_DIR" && docker compose down          # keep the broker volume
-cd "$TP1_DIR" && docker compose down          # keep the Postgres
-# wipe everything: add -v to either `down`
+cd "$TP1_DIR" && docker compose down          # keep the Postgres data
+# wipe: add -v
 ```
 
 ## 14) Common issues
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| app logs `AmqpConnectException` on boot | broker not up **yet** | start the **broker first**, then rebuild the app (README step 2) |
-| `500` instead of `503` when broker down | the `catch (AmqpConnectException)` is missing | add the **Step 6** wrap + `@ExceptionHandler` (see `exercise.md` Step 6) |
-| message **loops** (ready count climbs) | a consumer is **rejecting with `requeue=true`** | always `requeue=false` (Step 5) |
-| DLQ stays **empty** after a poison | queue **does not have** the `x-dead-letter-*` args | re-check `RabbitConfig` (Step 2) — args are on the **main queue** |
-| `guest`/`ACCESS_REFUSED` on connect | you used the stock `guest` account | use `listings`/`listings` (the `RABBITMQ_DEFAULT_*`) |
-| `401` on the management API | missing `-u listings:listings` | the mgmt API is **not public**; pass the broker creds |
-| second `spring:` key in `application.yml` | pasted the §0 block as a new top-level key | put `rabbitmq:` **under the existing** `spring:` (README §0.2) |
+| app loops on `PRECONDITION_FAILED - invalid arg 'x-delivery-limit'` and does not start | main queue declared **classic** | declare it **quorum** (Step 2); delete the old queue in the UI first |
+| `PRECONDITION_FAILED - inequivalent arg …` at startup | the queue already exists with other arguments | delete it in the UI (or `docker compose down -v` on the broker), restart the app |
+| the same warn line thousands of times, `unacked` stuck at 1 | a plain exception is **requeued** forever (classic queue, no delivery limit) | throw `AmqpRejectAndDontRequeueException` for poison (Step 5); quorum queue + `x-delivery-limit` |
+| `PRECONDITION_FAILED - unknown delivery tag` | manual `basicNack`/`basicAck` in `AUTO` acknowledge mode | remove the manual call (Step 5) |
+| `500` with `AmqpIOException` when the broker is down | the `catch` names `AmqpConnectException` only | catch `AmqpException` (Step 6) |
+| the first request after the broker stops hangs ~60 s | default connection timeout | `spring.rabbitmq.connection-timeout: 2s` (README §0) |
+| `/actuator/health` is 503 while the broker is down | `rabbit` health indicator | expected; `/actuator/health/liveness` is the "app alive" probe |
+| a `SENT` row that never became `DELIVERED` | the row was kept after a failed publish | delete it on `AmqpException` (Step 6) |
+| `GET /api/queues?name=…` shows the wrong queue | that query does not filter | use `/api/queues/%2F/<name>` |
+| `ACCESS_REFUSED` on connect | the stock `guest` account | use `listings`/`listings` |
+| `401` on the management API | missing `-u listings:listings` | pass the broker credentials |
+| second `spring:` key in `application.yml` | §0 block pasted as a new top-level key | put `rabbitmq:` under the existing `spring:` |

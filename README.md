@@ -47,6 +47,7 @@ spring:
     port:     ${RABBITMQ_PORT:5673}
     username: ${RABBITMQ_USERNAME:listings}
     password: ${RABBITMQ_PASSWORD:listings}
+    connection-timeout: 2s     # default 60 s: a stopped broker would hang requests (Step 6)
 ```
 
 **c) `docker-compose.yml`** (the TP1 one) — in `listings-api` →
@@ -125,17 +126,17 @@ cd "$TP1_DIR" && mvn clean verify
 | Step | What you do | How you prove it |
 |---|---|---|
 | 1 | RabbitMQ up + the app connects | `docker compose ps` healthy, `/api/overview` 200 |
-| 2 | Declare the topology in Java (`RabbitConfig`) | management UI shows the exchange + 2 queues + bindings |
+| 2 | Declare the topology in Java (`RabbitConfig`) | management UI shows the exchanges, the **quorum** main queue, the DLQ, and the bindings |
 | 3 | `POST /listings/{id}/messages` → 202 SENT | the message is in the broker (`ready ≥ 1`, `consumers = 0`) |
 | 4 | Consume + reply — the full conversation | both sides see the thread in `GET /listings/{id}/messages` |
 | 5 | Poison message → DLQ | the message **lands in** `listings.messages.dlq`, visible in the UI |
-| 6 | Broker down → 503 | `docker compose stop rabbitmq` → `POST …/messages` returns **503**, API still up |
+| 6 | Broker down → 503 | `docker compose stop rabbitmq` → `POST …/messages` returns **503** in a few seconds, `/actuator/health/liveness` stays 200 |
 
 **Bonus (Steps 7-8, ~1h45):**
 
 | Step | What you do |
 |---|---|
-| 7 | A redelivered message is **not duplicated** |
+| 7 | A redelivered or duplicated message is **not stored twice** |
 | 8 | `PENDING → SENT → DELIVERED` (transactional outbox) |
 
 The full pedagogical statement is in [`exercise.md`](exercise.md).
@@ -153,6 +154,7 @@ messaging/
 springboot/  (your TP1 repo — you add the messaging package here)
 ├── pom.xml                              # + spring-boot-starter-amqp
 ├── src/main/resources/application.yml   # + spring.rabbitmq block
+├── src/main/resources/db/changelog/v1.2-messages.yaml   # [Step 3] + include in the master
 ├── docker-compose.yml                   # + RABBITMQ_HOST / PORT
 └── src/main/java/com/app/listings/messaging/
     ├── RabbitConfig.java                # [Step 2]
@@ -166,6 +168,7 @@ springboot/  (your TP1 repo — you add the messaging package here)
 
 ## Useful links
 
-- [Spring AMQP reference](https://docs.spring.io/spring-amqp/reference/html/)
-- [RabbitMQ getting started](https://www.rabbitmq.com/docs/getstarted)
-- [RabbitMQ DLX (dead-letter queue)](https://www.rabbitmq.com/dlx.html)
+- [Spring AMQP 4.1 reference](https://docs.spring.io/spring-amqp/reference/4.1/index.html)
+- [Spring Boot 4.1 — AMQP](https://docs.spring.io/spring-boot/4.1/reference/messaging/amqp.html)
+- [RabbitMQ quorum queues](https://www.rabbitmq.com/docs/quorum-queues)
+- [RabbitMQ dead lettering](https://www.rabbitmq.com/docs/dlx)
