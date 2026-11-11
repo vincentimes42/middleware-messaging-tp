@@ -95,7 +95,9 @@ done
 queue listings.messages; queue listings.messages.dlq
 ```
 
-## 7) Step 3 — publish (202 SENT)
+## 7) Steps 3a-3b — publish (202 SENT) and read the thread
+
+### 7a) Step 3a — publish
 
 Before Step 4 exists (no consumer yet):
 
@@ -117,6 +119,11 @@ code -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":""}'   
 code -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" \
   -d '{"body":"hi","inReplyTo":"00000000-0000-0000-0000-000000000000"}'                                # 422
 code -u $SELLER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"to myself"}'               # 422
+```
+
+### 7b) Step 3b — read the thread
+
+```bash
 code -u $OTHER "$API/listings/1/messages"                                                              # 200 (empty list)
 curl -fsS -u $SELLER "$API/listings/1/messages" | python3 -m json.tool                                 # full thread
 ```
@@ -217,14 +224,20 @@ sql "SELECT message_id FROM message GROUP BY message_id HAVING count(*) > 1"   #
 (cd "$TP1_DIR" && docker compose logs listings-api | grep -ciE "duplicate key")    # 0
 ```
 
-## 12) Step 8 (bonus) — transactional outbox
+## 12) Steps 8a-8b (bonus) — transactional outbox
+
+### 12a) Step 8a — 202 PENDING with the broker down
 
 ```bash
 (cd "$MSG_DIR" && docker compose stop rabbitmq)
 curl -s -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"queued while down?"}'
 # 202 with "status":"PENDING"
 sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # PENDING
+```
 
+### 12b) Step 8b — the poller drains PENDING rows
+
+```bash
 (cd "$MSG_DIR" && docker compose start rabbitmq)
 until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 15
 sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # SENT, then DELIVERED
