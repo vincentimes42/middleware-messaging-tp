@@ -44,8 +44,9 @@ OTHER='carol@test.org:secret123'
 JSON='Content-Type: application/json'
 
 # one queue (NB: /api/queues?name=… does NOT filter: always use the path form).
-# The management counters (ready, unacked) are refreshed every ~5 s: wait ~6 s
-# after an action before reading them.
+# The management counters (ready, unacked) are refreshed every ~5 s, and the
+# first read after a queue is created can lag more: wait ~10 s after an action
+# before reading them (or: docker compose exec rabbitmq rabbitmqctl list_queues).
 queue() { curl -fsS -u $MQ "$MGMT/queues/%2F/$1" | python3 -c '
 import sys, json; q = json.load(sys.stdin)
 print(q["name"], "| type", q["type"], "| ready", q["messages_ready"],
@@ -69,13 +70,17 @@ curl -fsS -u $SELLER "$API/listings/1" | python3 -m json.tool
 ```bash
 curl -fsS -u $MQ "$MGMT/overview" | python3 -c 'import sys,json; print("rabbitmq", json.load(sys.stdin)["rabbitmq_version"])'
 curl -s -o /dev/null -w "no-auth -> HTTP %{http_code}\n" "$MGMT/overview"      # 401
-curl -fsS "$API/actuator/health"                                                # {"status":"UP"...}
+curl -fsS "$API/actuator/health"; echo                                          # {"status":"UP"...}
 curl -fsS -u $MQ "$MGMT/queues" | python3 -c 'import sys,json; print([q["name"] for q in json.load(sys.stdin)])'   # [] before Step 2
 ```
 
 ## 6) Step 2 — the app-declared topology
 
 ```bash
+# Spring AMQP connects lazily: until the Step 4 listener exists, nothing connects
+# at boot. The health check's `rabbit` indicator opens the first connection,
+# and RabbitAdmin declares the topology on it.
+curl -s -o /dev/null -w "health -> %{http_code}\n" "$API/actuator/health"
 for x in listings.direct listings.messages.dlx; do
   curl -fsS -u $MQ "$MGMT/exchanges/%2F/$x" | python3 -c 'import sys,json; e=json.load(sys.stdin); print(e["name"], e["type"], "durable", e["durable"])'
 done
@@ -105,7 +110,7 @@ Before Step 4 exists (no consumer yet):
 resp=$(curl -fsS -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"Is this still available?"}')
 echo "$resp"                                                 # {"messageId":"<uuid>","status":"SENT"}
 MID=$(echo "$resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["messageId"])')
-queue listings.messages                                      # ready >= 1, consumers 0
+sleep 10; queue listings.messages                            # ready >= 1, consumers 0
 sql "SELECT message_id, from_user_id, to_user_id, status FROM message WHERE message_id='$MID'"
 ```
 
@@ -131,7 +136,7 @@ curl -fsS -u $SELLER "$API/listings/1/messages" | python3 -m json.tool          
 ## 8) Step 4 — consume + reply
 
 ```bash
-sleep 6; queue listings.messages                             # consumers 1, ready back to 0
+sleep 10; queue listings.messages                            # consumers 1, ready back to 0
 sql "SELECT status, delivered_at FROM message WHERE message_id='$MID'"   # DELIVERED
 
 # the seller replies to the buyer
@@ -142,9 +147,9 @@ curl -fsS -u $BUYER "$API/listings/1/messages" | python3 -c 'import sys,json; d=
 
 # duplicate delivery: re-publish the exact envelope of $MID -> still one row
 ENV=$(sql "SELECT json_build_object('messageId',message_id,'listingId',listing_id,'fromUserId',from_user_id,'toUserId',to_user_id,'inReplyToMessageId',in_reply_to,'body',body,'sentAt',sent_at) FROM message WHERE message_id='$MID'" | sed -n 3p)
-publish "$ENV"; sleep 2
+publish "$ENV"; sleep 5                                   # let the listener process it
 sql "SELECT count(*) FROM message WHERE message_id='$MID'"                # 1
-(cd "$TP1_DIR" && docker compose logs --since 2m listings-api | grep -iE "warn|exception" | tail -5)
+(cd "$TP1_DIR" && docker compose logs --since 2m listings-api | grep -E "skipping|duplicate|poison" | tail -5)   # your listener's lines
 ```
 
 Adapt the column names in the `json_build_object` to your changelog if they
@@ -155,7 +160,7 @@ differ (`in_reply_to` / `in_reply_to_message_id`).
 ```bash
 queue listings.messages.dlq                                  # note the ready count
 publish '{"oops":true}'                                      # {"routed":true}
-sleep 6                                                      # counters lag ~5 s
+sleep 10                                                     # counters lag ~5-10 s
 queue listings.messages                                      # ready 0 (not stuck)
 queue listings.messages.dlq                                  # ready +1
 
@@ -164,6 +169,8 @@ curl -fsS -u $MQ -X POST "$MGMT/queues/%2F/listings.messages.dlq/get" -H "$JSON"
   -d '{"count":5,"ackmode":"ack_requeue_true","encoding":"auto"}' \
   | python3 -c 'import sys,json; [print(m["payload"], "| x-death:", [(d["queue"], d["reason"]) for d in m["properties"].get("headers",{}).get("x-death",[])]) for m in json.load(sys.stdin)]'
 # expected: {"oops":true} | x-death: [('listings.messages', 'rejected')]
+# 'delivery_limit' instead of 'rejected': the poison parsed (Jackson ignores
+# unknown properties) and failed later, after 3 redeliveries (Step 5, item 1)
 
 # a legitimate message afterwards is still processed
 curl -fsS -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"after the poison"}'; echo
@@ -195,6 +202,26 @@ until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 
 curl -s -w "\n-> HTTP %{http_code}\n" -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d '{"body":"back?"}'   # 202
 queue listings.messages                                      # consumers 1 again
 sql "SELECT status, count(*) FROM message GROUP BY status"   # all DELIVERED
+```
+
+Row 6.6 (a backlog survives the broker restart). With the consumer attached
+the queue is always empty: stop the app first, so messages wait in the queue.
+
+```bash
+(cd "$TP1_DIR" && docker compose stop listings-api)
+FROM=$(sql "SELECT from_user_id FROM message WHERE message_id='$MID'" | sed -n 3p | tr -d ' ')
+TO=$(sql "SELECT to_user_id FROM message WHERE message_id='$MID'" | sed -n 3p | tr -d ' ')
+IDS=""
+for i in 1 2; do
+  U=$(python3 -c 'import uuid;print(uuid.uuid4())'); IDS="$IDS'$U',"
+  publish "{\"messageId\":\"$U\",\"listingId\":1,\"fromUserId\":$FROM,\"toUserId\":$TO,\"inReplyToMessageId\":null,\"body\":\"backlog $i\",\"sentAt\":\"$(date -u +%FT%TZ)\"}"
+done; IDS=${IDS%,}
+sleep 10; queue listings.messages                            # ready 2, consumers 0
+(cd "$MSG_DIR" && docker compose stop rabbitmq && docker compose start rabbitmq)
+until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 10
+queue listings.messages                                      # still ready 2 (durable queue)
+(cd "$TP1_DIR" && docker compose start listings-api); sleep 30
+sql "SELECT status, count(*) FROM message WHERE message_id IN ($IDS) GROUP BY status"   # DELIVERED | 2
 ```
 
 ## 11) Step 7 (bonus) — duplicates and redelivery
@@ -242,6 +269,26 @@ sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # 
 until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 15
 sql "SELECT message_id, status FROM message ORDER BY sent_at DESC LIMIT 1"    # SENT, then DELIVERED
 sql "SELECT count(*) FROM message WHERE status='PENDING'"                     # 0
+```
+
+Optional, row 8.6: a second instance of the same image (same database, same
+broker, poller every second), then PENDING rows drained by both.
+
+```bash
+docker run -d --name listings-api-2 --network middleware -p 8090:8080 \
+  -e SPRING_DATASOURCE_URL=jdbc:postgresql://listings-postgres:5432/listings \
+  -e SPRING_DATASOURCE_USERNAME=listings -e SPRING_DATASOURCE_PASSWORD=listings \
+  -e RABBITMQ_HOST=rabbitmq -e RABBITMQ_PORT=5672 -e LISTINGS_MESSAGING_OUTBOX_INTERVAL_MS=1000 \
+  listings-api:tp1
+until curl -fsS -o /dev/null http://localhost:8090/actuator/health/liveness 2>/dev/null; do sleep 2; done
+(cd "$MSG_DIR" && docker compose stop rabbitmq)
+for i in $(seq 6); do curl -s -o /dev/null -u $BUYER -X POST "$API/listings/1/messages" -H "$JSON" -d "{\"body\":\"race $i\"}"; done
+T0=$(date -u +%FT%TZ)
+(cd "$MSG_DIR" && docker compose start rabbitmq)
+until (cd "$MSG_DIR" && docker compose ps rabbitmq | grep -q healthy); do sleep 3; done; sleep 15
+echo "published: $( (cd "$TP1_DIR" && docker compose logs --since "$T0" listings-api; docker logs --since "$T0" listings-api-2 2>&1) | grep -ci "outbox.*publish")"   # 6 in total (adapt the grep to your log line)
+sql "SELECT message_id FROM message GROUP BY message_id HAVING count(*) > 1"   # 0 rows
+docker rm -f listings-api-2
 ```
 
 ## 13) Stop
