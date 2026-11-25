@@ -73,40 +73,62 @@ messaging layer:
 
 ### The `message` entity (the only new business data)
 
-A **`message`** is one turn of the conversation. One turn links **both** sides:
-the **buyer** who wrote it (`from_user_id`) and the **seller** it is for
-(`to_user_id`). The **`listing_id`** is the listing the question is about.
-`in_reply_to` points at the previous `message_id` in the same thread
-(`null` for the opening message). `status` is the *delivery* state of **this**
-row: `SENT` (published, broker holds it) → `DELIVERED` (the consumer persisted
-it, the seller can read it).
+A **`message`** is one turn of the conversation; it links **both** sides and
+the listing the question is about:
+
+```mermaid
+erDiagram
+    message {
+        uuid message_id UK "the producer's id"
+        bigint listing_id FK "the listing asked about"
+        bigint from_user_id FK "who wrote it"
+        bigint to_user_id FK "who it is for"
+        uuid in_reply_to "null when opening"
+        varchar status "see below"
+    }
+    listing ||--o{ message : "is about"
+    app_user ||--o{ message : "writes, receives"
+    message |o--o{ message : "in_reply_to"
+```
+
+`status` is the *delivery* state of **this** row:
+
+```mermaid
+stateDiagram-v2
+    [*] --> SENT : POST, broker up (Step 3a)
+    [*] --> PENDING : POST, broker down (Step 8a)
+    PENDING --> SENT : poller claims and publishes (Step 8b)
+    SENT --> PENDING : poller publish failed, revert (Step 8b)
+    SENT --> DELIVERED : consumer upserts (Step 4)
+    note right of DELIVERED : the seller can read it
+```
 
 ### The pieces of this TP, in one picture
 
-```
-   buyer  (any TP1 account)          seller (the listing owner)
-        |   POST /listings/{id}/messages   |   GET /listings/{id}/messages
-        v                                  ^
-   +-----------------------------------------------------------+
-   |                 listings-api (TP1, 8080)                  |
-   |   producer: publishes to queue      |   consumer: @RabbitListener
-   |   com.app.listings.messaging.*      |   persists the message,
-   +---------------------------^---------+     flips status SENT -> DELIVERED
-                                | AMQP (network name `rabbitmq`:5672)
-                                v
-   +-----------------------------------------------------------+
-   |                    RabbitMQ 4.x (5673 / 15673)            |
-   |   exchange `listings.direct` -> binding -> queue ...      |
-   |   queue listings.messages   (durable)                     |
-   |   DLX  listings.messages.dlx -> DLQ listings.messages.dlq |
-   +-----------------------------------------------------------+
+```mermaid
+flowchart TD
+    buyer(["<b>buyer</b><br/>any TP1 account"])
+    seller(["<b>seller</b><br/>the listing owner"])
+    subgraph app["listings-api (TP1, 8080)"]
+        prod["<b>producer</b><br/>RabbitTemplate"]
+        cons["<b>consumer</b><br/>@RabbitListener<br/><i>persists, SENT → DELIVERED</i>"]
+        read["<b>thread view</b>"]
+    end
+    pg[("Postgres<br/>message table")]
+    subgraph broker["RabbitMQ 4.x"]
+        ex["exchange listings.direct"] -- "binding" --> q["queue listings.messages<br/><i>quorum, durable</i>"]
+        q -. "dead-letter" .-> dlx["DLX listings.messages.dlx"] --> dlq["DLQ listings.messages.dlq"]
+    end
+    buyer -- "POST /listings/{id}/messages" --> prod
+    prod -- "AMQP, rabbitmq:5672" --> ex
+    q --> cons --> pg
+    seller -- "GET /listings/{id}/messages" --> read --> pg
 ```
 
-> **Why one library and one broker:** **Spring AMQP** is the client side of
-> your API (the `RabbitTemplate` producer + the `@RabbitListener` consumer).
-> **RabbitMQ** is the server that stores and routes the messages. Keep the two
-> separate in your head: a buyer `POST`s to your API; your API speaks **AMQP**
-> to the broker; the broker routes to the queue; your API reads it back.
+**Spring AMQP** is the client side, inside your API (`com.app.listings.messaging.*`);
+**RabbitMQ** is the server that stores and routes the messages
+([`docs/primer.md`](docs/primer.md)). In the step diagrams, the highlighted
+boxes are the parts you write in that step, red boxes are error answers.
 
 ---
 
@@ -117,6 +139,28 @@ it, the seller can read it).
 | **Core** (required — must fit the 8h) | 1 · 2 · 3a · 3b · 4 · 5 · 6 | ~5h45 |
 | **Bonus** (start only when the core is green) | 7 (at-least-once / redelivery) · 8a-8b (transactional outbox) | ~1h45 |
 | **Delivery** | 9 (final integration) | ~0h15 |
+
+```mermaid
+flowchart TD
+    subgraph core1["CORE, in order"]
+        direction LR
+        s1["1<br/>stack up"] --> s2["2<br/>topology"] --> s3a["3a<br/>publish"] --> s3b["3b<br/>read thread"]
+    end
+    subgraph core2[" "]
+        direction LR
+        s4["4<br/>consume"] --> s5["5<br/>DLQ"] --> s6["6<br/>broker down"]
+    end
+    subgraph bonus["BONUS"]
+        direction LR
+        s7["7<br/>at-least-once"]
+        s8a["8a<br/>outbox, producer"] --> s8b["8b<br/>outbox, poller"]
+        s7 ~~~ s8a
+    end
+    core1 --> core2 --> s9["9<br/>delivery"]
+    core2 -. "core green" .-> bonus -.-> s9
+    classDef bonusStep stroke-dasharray:4 3
+    class s7,s8a,s8b bonusStep
+```
 
 Bonus steps are optional but count for the grade if you deliver them.
 
@@ -185,11 +229,20 @@ any AMQP code, means a later failure points at your code, not at the setup.
 
 ### How it fits
 
-```
-../springboot/docker-compose.yml           messaging/docker-compose.yml (this repo)
-  listings-api      :8080                    rabbitmq  :5673 (AMQP)  :15673 (management UI + API)
-  listings-postgres :5435                    user listings / listings
-     └── RABBITMQ_HOST=rabbitmq, RABBITMQ_PORT=5672 ──► rabbitmq:5672 (network `middleware`)
+```mermaid
+flowchart LR
+    subgraph net["network middleware (TP1)"]
+        subgraph tp1["TP1 compose"]
+            api["<b>listings-api</b> :8080<br/><i>RABBITMQ_HOST=rabbitmq<br/>RABBITMQ_PORT=5672 · item 1</i>"]
+            pg[("listings-postgres<br/>:5435")]
+        end
+        subgraph msg["messaging compose"]
+            rmq["<b>rabbitmq</b><br/>:5673 (AMQP)<br/>:15673 (management UI + API)<br/>user listings / listings"]
+        end
+    end
+    api -- "rabbitmq:5672" --> rmq
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class api todo
 ```
 
 ### Build it
@@ -243,12 +296,14 @@ wiring prepared here is what Step 5 relies on.
 
 ### How it fits
 
-```
-producer ──► exchange listings.direct ── binding (rk listings.messages) ──► queue listings.messages
-                                                                              │ args: x-dead-letter-exchange,
-                                                                              │       x-dead-letter-routing-key, x-delivery-limit
-                                                                              ▼ (rejected / too many deliveries)
-             exchange listings.messages.dlx ── binding (rk listings.messages.dlq) ──► queue listings.messages.dlq
+```mermaid
+flowchart TD
+    p(["producer"]) --> ex["<b>exchange listings.direct</b><br/>direct"]
+    ex -- "binding, rk listings.messages" --> q["<b>queue listings.messages</b><br/>quorum · x-delivery-limit: 3<br/>x-dead-letter-exchange / -routing-key"]
+    q -. "rejected, or too many deliveries" .-> dlx["<b>exchange listings.messages.dlx</b><br/>direct"]
+    dlx -- "binding, rk listings.messages.dlq" --> dlq["<b>queue listings.messages.dlq</b><br/>durable, the sink"]
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class ex,q,dlx,dlq todo
 ```
 
 ### Build it
@@ -338,16 +393,15 @@ it. That is why the answer is **202 Accepted** (taken in charge), not
 
 ### How it fits
 
-```
-POST /listings/{id}/messages (Basic)
-   │
-   ▼
-MessageController (group C) ──► MessageService.send (group B)
-                                   ├─ validate (404, 422), resolve toUserId, new messageId (UUID)
-                                   ├─ INSERT message row, status SENT ──► Postgres `message` (group A)
-                                   └─ convertAndSend("listings.messages") ──► listings.direct ──► queue
-                                                                               ready +1, consumers 0
-◄── 202 { messageId, status: SENT }
+```mermaid
+flowchart TD
+    req(["POST /listings/{id}/messages (Basic)"]) --> ctl["<b>MessageController</b> · group C"]
+    ctl --> svc["<b>MessageService.send</b> · group B<br/><i>validate (404, 422), resolve toUserId,<br/>new messageId (UUID)</i>"]
+    svc -- "(1) INSERT, status SENT, committed" --> pg[("<b>message table</b> · group A")]
+    svc -- "(2) convertAndSend(listings.messages)" --> ex["listings.direct"] --> q["queue listings.messages<br/><i>ready +1, consumers 0</i>"]
+    ctl -- "(3)" --> ans(["202 {messageId, status: SENT}"])
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class ctl,svc,pg todo
 ```
 
 ### Build it
@@ -420,11 +474,22 @@ MessageController (group C) ──► MessageService.send (group B)
 ### Expected behavior
 
 **The one rule** — `fromUserId` is **always the caller** (the HTTP-Basic
-identity, **never** the body). `toUserId` is **always explicit**: the
-`from_user_id` of the `inReplyTo` message when **replying**, the **listing's
-owner** when **opening**. A self-message (`fromUserId == toUserId`) is a
-**422** — the **only** case where an *opening* message (no `inReplyTo`) is
-rejected.
+identity, **never** the body). `toUserId` is resolved, then checked, in this
+order (a blank `body` is already a 422 from the DTO):
+
+```mermaid
+flowchart LR
+    s(["POST<br/>from = caller"]) --> r{"inReplyTo<br/>set?"}
+    r -- "no: opening" --> o["to = listing owner"]
+    r -- "yes: reply" --> m{"that message exists<br/>on this listing?"}
+    m -- "no" --> e1["422 inReplyTo"]
+    m -- "yes" --> t["to = its from_user_id"]
+    o & t --> self{"from == to?"}
+    self -- "yes" --> e2["422<br/><i>self-message</i>"]
+    self -- "no" --> ok["202 SENT"]
+    classDef err fill:#fecaca,stroke:#b91c1c,color:#111
+    class e1,e2 err
+```
 
 | Caller (Basic) | **POST — open** (no `inReplyTo`) | **POST — reply** (`inReplyTo` = a real msg on this listing) | **POST — `inReplyTo`** unknown / foreign | **POST — empty `body`** |
 |---|---|---|---|---|
@@ -529,12 +594,14 @@ time changes nothing.
 
 ### How it fits
 
-```
-queue listings.messages ──► @RabbitListener MessageListener.onMessage (item 3)
-                               ├─ parse JSON ──► MqMessage (item 1)
-                               ├─ upsert by message_id: SENT ──► DELIVERED, delivered_at (item 2)
-                               ├─ known business problem ──► log.warn, return (message acked, removed)
-                               └─ unexpected error ──► exception ──► rejected (Step 5: DLQ)
+```mermaid
+flowchart TD
+    q(["queue listings.messages"]) --> l["<b>@RabbitListener MessageListener.onMessage</b> · item 3"]
+    l --> p["<b>parse JSON → MqMessage</b> · item 1"] --> u["<b>upsert by message_id</b> · item 2<br/>SENT → DELIVERED, delivered_at"]
+    l -- "known business problem" --> w["log.warn, return<br/><i>acked, removed</i>"]
+    l -- "unexpected error" --> x["exception bubbles<br/><i>requeued; past x-delivery-limit: DLQ</i>"]
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class l,p,u todo
 ```
 
 ### Build it
@@ -645,12 +712,13 @@ other messages keep flowing.
 
 ### How it fits
 
-```
-poison {"oops":true} ──► listings.messages ──► onMessage: parse fails ──► AmqpRejectAndDontRequeueException
-                                                                              │
-     queue arguments x-dead-letter-exchange / -routing-key (Step 2) ◄─────────┘
-                                                                              ▼
-                                   listings.messages.dlx ──► listings.messages.dlq (ready +1, inspectable)
+```mermaid
+flowchart TD
+    poison(["poison {#quot;oops#quot;:true}"]) --> q["listings.messages"] --> l["<b>onMessage</b> · item 1<br/><i>parse fails</i>"]
+    l -- "AmqpRejectAndDontRequeueException" --> args["queue arguments<br/>x-dead-letter-exchange / -routing-key<br/><i>Step 2</i>"]
+    args --> dlx["listings.messages.dlx"] --> dlq["listings.messages.dlq<br/><i>ready +1, inspectable</i>"]
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class l todo
 ```
 
 ### Build it
@@ -731,13 +799,18 @@ fast 503 ("retry later"), and everything that does not need it keeps working.
 
 ### How it fits
 
-```
-broker stopped
-POST /messages ──► MessageService.send ──► convertAndSend ──✗ AmqpConnectException
-                        catch ──► BrokerUnavailableException (item 1-2)
-                                       ──► GlobalExceptionHandler ──► 503, TP1 JSON shape (item 3)
-GET /listings, /actuator/health ──► no broker on this path ──► 200
-broker restarted ──► connection re-established ──► 202 again; the durable queue still holds older messages
+```mermaid
+flowchart TD
+    subgraph down["broker stopped"]
+        w(["POST /messages"]) --> s["<b>MessageService.send</b> · item 2<br/><i>convertAndSend fails: AmqpException<br/>delete the row</i>"]
+        s --> b["<b>BrokerUnavailableException</b> · item 1"] --> h["<b>GlobalExceptionHandler</b> · item 4"] --> e503["503<br/><i>TP1 JSON shape, a few seconds (item 3)</i>"]
+        r(["GET /listings<br/>GET /actuator/health/liveness"]) --> ok["200<br/><i>no broker on this path</i>"]
+    end
+    down -- "broker restarted" --> back["202 again<br/><i>the durable queue drains → DELIVERED</i>"]
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    classDef err fill:#fecaca,stroke:#b91c1c,color:#111
+    class s,b,h todo
+    class e503 err
 ```
 
 > **Superseded by Step 8a (bonus)** — Step 8a replaces the **503** with a
@@ -841,10 +914,18 @@ happen on purpose and checks that the database still holds one row.
 
 ### How it fits
 
-```
-message delivered to the consumer ──✗ consumer stops before the ack
-   └─ broker keeps it (unacked ──► ready again) ──► consumer restarts ──► delivered again (redelivered = true)
-                                                                       └─ upsert by message_id ──► still 1 row
+```mermaid
+sequenceDiagram
+    participant Q as queue listings.messages
+    participant L as listings-api consumer
+    participant DB as message table
+    Q->>L: deliver M
+    Note over L: killed before the ack (item 3)
+    Note over Q: M unacked, ready again
+    Note over L: restarted
+    Q->>L: deliver M again, redelivered = true (logged, item 1)
+    L->>DB: upsert by message_id
+    Note over DB: still 1 row for M
 ```
 
 ### Pre-req
@@ -924,12 +1005,13 @@ instead of losing them.
 
 ### How it fits
 
-```
-POST /messages ──► MessageService.send: INSERT row PENDING ──► try publish ──┬─ ok ──► UPDATE SENT ──► 202 SENT
-                                                                             └─ broker down ──► 202 PENDING
-@Scheduled MessageOutbox.drain (every 5 s)
-   └─ for each PENDING row: claim (UPDATE … WHERE status = PENDING) ──► publish ──► Step 4 consumer ──► DELIVERED
-                                       └─ 0 rows affected: another instance has it ──► skip
+```mermaid
+flowchart TD
+    w(["POST /messages"]) --> ins["<b>MessageService.send</b> · item 2<br/>INSERT row PENDING"] --> pub{"publish ok?"}
+    pub -- "yes" --> upd["UPDATE SENT<br/><i>only if still PENDING</i>"] --> s202["202 SENT"]
+    pub -- "no: broker down" --> p202["202 PENDING<br/><i>row stays PENDING;<br/>the Step 8b poller publishes it later</i>"]
+    classDef todo fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111
+    class ins,pub,upd todo
 ```
 
 > **Overrides Step 6 on the publish path** — the **503** contract is
@@ -1000,6 +1082,26 @@ API instances. A **broker outage** never loses a message.
 database. The poller moves them to the broker, and an atomic claim makes sure
 two instances never publish the same row.
 
+### How it fits
+
+Every `interval-ms`, each instance's poller takes the `PENDING` rows, oldest
+first; for one row `M`, two instances race like this:
+
+```mermaid
+sequenceDiagram
+    participant A as instance A poller
+    participant DB as message table
+    participant B as instance B poller
+    participant R as RabbitMQ
+    A->>DB: claim M: UPDATE … WHERE status = PENDING
+    B->>DB: claim M: the same UPDATE
+    DB-->>A: 1 row affected
+    DB-->>B: 0 rows affected: skip, do not publish
+    A->>R: convertAndSend M (only after the claim)
+    Note over A,R: publish failed? revert M to PENDING, warn
+    R-->>DB: Step 4 consumer: M becomes DELIVERED
+```
+
 ### Build it
 
 **A. Poller — move PENDING rows to the broker**
@@ -1018,12 +1120,9 @@ two instances never publish the same row.
    that return the number of affected rows: `claim` (`PENDING` → `SENT` for
    one `messageId`, **only if** it is still `PENDING`) and `revert` (back to
    `PENDING`).
-   The **`WHERE … status = PENDING`** is what makes `claim()` **atomic**:
-   under **two instances** racing on the **same** row, **only one** gets
-   `affected = 1` (the rest get **0** and must **not** publish). If you
-   write it as **`WHERE messageId = ?`**, both instances update (and both
-   publish) — **double-publish race** — which is **the exact failure** 8.6
-   guards against.
+   The **`WHERE … status = PENDING`** is the guard of the *How it fits*
+   diagram: written as **`WHERE messageId = ?`** alone, both instances
+   update and both publish, the **double-publish race** 8.6 guards against.
    → The claim is a database-level lock without a lock: only one poller can
    move a row out of `PENDING`.
 
