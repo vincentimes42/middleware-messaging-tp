@@ -156,16 +156,18 @@ messaging/
 springboot/  (your TP1 repo — you add the messaging package here)
 ├── pom.xml                              # + spring-boot-starter-amqp
 ├── src/main/resources/application.yml   # + spring.rabbitmq block
-├── src/main/resources/db/changelog/v1.2-messages.yaml   # [Step 3a] + include in the master
+├── src/main/resources/db/changelog/v1.2-messages.yaml   # [Step 3a, 4: a 2nd change set] + include in the master
 ├── docker-compose.yml                   # + RABBITMQ_HOST / PORT
 └── src/main/java/com/app/listings/messaging/
-    ├── RabbitConfig.java                # [Step 2]
-    ├── MessageEntity.java               # [Step 3a]
-    ├── MessageRepository.java           # [Step 3a-4]
-    ├── MessageService.java              # [Step 3a, 6]
-    ├── MessageController.java           # [Step 3a-3b]
-    ├── MessageListener.java             # [Step 4-5]
-    └── BrokerUnavailableException.java  # [Step 6]
+    ├── config/RabbitConfig.java                  # [Step 2]
+    ├── MessageEntity.java                        # [Step 3a]
+    ├── MessageRepository.java                    # [Step 3a-4, 8b]
+    ├── MessageService.java                       # [Step 3a, 6, 8a]
+    ├── MessageController.java                    # [Step 3a-3b]
+    ├── mq/MqMessage.java                         # [Step 3a-4] the wire envelope
+    ├── MessageListener.java                      # [Step 4-5]
+    ├── exception/BrokerUnavailableException.java # [Step 6]
+    └── MessageOutbox.java                        # [Step 8b] (+ @EnableScheduling)
 ```
 
 ## Useful links

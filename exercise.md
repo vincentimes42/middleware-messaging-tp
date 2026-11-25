@@ -277,7 +277,9 @@ producer ──► exchange listings.direct ── binding (rk listings.messages
    broker and the app does **not** start.
 
 2. **Configure** a `RabbitTemplate` bean with
-   `setDefaultExchange("listings.direct")`. This is what lets the Step 3a
+   `setExchange("listings.direct")` (the exchange used when a send names no
+   exchange; Boot's equivalent property is `spring.rabbitmq.template.exchange`).
+   This is what lets the Step 3a
    producer call `convertAndSend("listings.messages", msg)` with **only**
    the routing key — the exchange is the **named** one, not the
    anonymous `$default`.
@@ -285,11 +287,14 @@ producer ──► exchange listings.direct ── binding (rk listings.messages
    exchange, which routes by queue name and bypasses `listings.direct` and
    its binding.
 
-3. **Restart** the app (`docker compose restart listings-api`) and
-   **verify** the two queues, two exchanges, and two bindings in the
-   management UI (or via `curl`, §6).
+3. **Restart** the app (`docker compose restart listings-api`), **open a
+   first broker connection** (`curl -s localhost:8080/actuator/health`: its
+   `rabbit` indicator connects), then **verify** the two queues, two
+   exchanges, and two bindings in the management UI (or via `curl`, §6).
    → The declarations run when the app opens its first broker connection,
-   so a restart is the moment to check them.
+   and Spring AMQP connects lazily: until Step 4 adds a listener (which
+   connects at startup), nothing connects at boot, and the topology is not
+   there yet.
 
 > **Why declare in code (not in the UI):** the management UI is a **view**,
 > not a **source of truth**. A fresh `docker compose down -v` would wipe
@@ -307,7 +312,7 @@ producer ──► exchange listings.direct ── binding (rk listings.messages
 ### Verify
 
 - [ ] [`docs/verification.md` §6](docs/verification.md): every result matches *Expected behavior*
-- [ ] `grep -n "@Bean" src/main/java/com/app/listings/messaging/config/RabbitConfig.java` — the six beans are **declared in code**, none drawn in the UI
+- [ ] `grep -n "@Bean" src/main/java/com/app/listings/messaging/config/RabbitConfig.java` — the six topology beans (plus the `RabbitTemplate` of item 2) are **declared in code**, none drawn in the UI
 
 <details>
 <summary><strong>If you are stuck</strong></summary>
@@ -384,16 +389,25 @@ MessageController (group C) ──► MessageService.send (group B)
      of that message; otherwise take the **listing's owner**
    - **validates**: `fromUserId != toUserId` (else 422), `body` non-blank
      (else 422), `inReplyTo` exists and belongs to the same listing (else 422),
-     listing exists (else TP1 `ResourceNotFoundException`)
+     listing exists (else TP1 `ResourceNotFoundException`). The blank body
+     is a DTO constraint (`@NotBlank`, TP1's 422); the other two rules need
+     the database: throw your own exception and map it to a 422 with the
+     same JSON shape (`fields`) in `GlobalExceptionHandler`
    - **generates** a `messageId` via `UUID.randomUUID().toString()`
-   - **persists** the row (`status=SENT`, `sentAt=now`)
-   - **publishes** with `rabbitTemplate.convertAndSend(RK, jsonBody)` — the
+   - **persists** the row (`status=SENT`, `sentAt=now`), **committed**
+     before the publish (do not put `send` in one transaction)
+   - **publishes** with `rabbitTemplate.convertAndSend(RK, jsonBody)`, the
+     JSON of a small envelope DTO (e.g. `messaging.mq.MqMessage`, the
+     `Conventions` fields; Step 4 parses the same DTO) — the
      routing key is the **literal** string `listings.messages` (do **not**
-     pass the exchange, `setDefaultExchange` is already configured in Step 2)
+     pass the exchange, `setExchange` is already configured in Step 2)
 
    → All the conversation rules live in one place. The id is created
    **before** publishing, by the producer: the broker gives none, and the
-   same id travels in the message, the row, and the 202 answer.
+   same id travels in the message, the row, and the 202 answer. A row
+   committed only after the publish (one transaction) races with the Step 4
+   consumer: it can receive the message, find no row, insert one, and the
+   producer's commit then fails on the unique `message_id`.
 
 **C. HTTP — the endpoint**
 
@@ -465,6 +479,11 @@ the API does not even reveal that a conversation exists.
    that reads via the repository and filters to the caller's turns.
    → Without the filter, any authenticated account reads every buyer's
    questions.
+2. **Protect** the path in `SecurityConfig`: a rule
+   `/listings/*/messages` → `authenticated()`, **before** TP1's public
+   `GET /listings/**` (first match wins).
+   → TP1 makes every `GET` under `/listings` public: without the rule, an
+   anonymous `GET` reaches your controller with no user, instead of a 401.
 
 ### Expected behavior
 
@@ -520,7 +539,7 @@ queue listings.messages ──► @RabbitListener MessageListener.onMessage (ite
 
 ### Build it
 
-1. **Create** a small **DTO** you name, e.g.
+1. **Reuse** (or create) the small envelope **DTO** of Step 3a, e.g.
    `com.app.listings.messaging.mq.MqMessage` — fields matching the wire
    envelope in `Conventions` (`messageId`, `listingId`, `fromUserId`,
    `toUserId`, `inReplyToMessageId`, `body`, `sentAt`). This is the **parse
@@ -529,12 +548,16 @@ queue listings.messages ──► @RabbitListener MessageListener.onMessage (ite
    ties a broker message to a JPA mapping.
 
 2. **Add** the field **`deliveredAt`** (type `Instant`) to
-   `com.app.listings.messaging.MessageEntity` and to the Liquibase
-   `v1.2-messages.yaml` change set (`timestamp WITH TIME ZONE`, **nullable**).
-   The Step 3a row creation sets it, the Step 4 upsert **reads** it.
+   `com.app.listings.messaging.MessageEntity`, and the column with a **new**
+   change set in `v1.2-messages.yaml` (`addColumn`, `timestamp WITH TIME
+   ZONE`, **nullable**). The Step 3a row creation leaves it `null`, the
+   Step 4 upsert **sets** it.
    → It records *when* the consumer processed the message, which is how you
    measure the delay a queue introduces. Nullable, because the row exists
-   (SENT) before the consumer sees it.
+   (SENT) before the consumer sees it. A new change set, not an edit of the
+   Step 3a one: that one is already applied, and Liquibase refuses to start
+   when an applied change set changed (checksum) — migrations stay additive
+   (TP1 rule).
 
 3. **Create** `com.app.listings.messaging.MessageListener` — a `@Component`
    with **one** method:
@@ -584,9 +607,10 @@ queue listings.messages ──► @RabbitListener MessageListener.onMessage (ite
 - **Business cases** (a buyer that no longer exists, an orphan `inReplyTo`) —
   `docker compose logs listings-api` shows **`log.warn`**, **no stack
   trace** (the listener chose to skip and the ack is safe).
-- **Poison messages** (a JSON body that does **not** parse as `MqMessage`)
-  end up in `listings.messages.dlq`: after 3 failed attempts in this step,
-  immediately once Step 5 is done.
+- **Poison messages** (a body that cannot be read as an `MqMessage`) end up
+  in `listings.messages.dlq`: in this step after the first delivery and 3
+  redeliveries (`x-death` reason `delivery_limit`), immediately once Step 5 is
+  done (`rejected`).
 
 ### Verify
 
@@ -631,9 +655,13 @@ poison {"oops":true} ──► listings.messages ──► onMessage: parse fail
 
 ### Build it
 
-1. **Modify** `MessageListener.onMessage` — when the body cannot be parsed as
-   `MqMessage`, log a `warn` (the delivery, never the body) and throw
-   `org.springframework.amqp.AmqpRejectAndDontRequeueException`.
+1. **Modify** `MessageListener.onMessage` — when the body cannot be read as
+   an `MqMessage` (not JSON, **or** JSON without the envelope's required
+   fields: Jackson ignores unknown properties, so `{"oops":true}` parses into
+   an envelope full of `null`), log a `warn` (the delivery, never the body)
+   and throw `org.springframework.amqp.AmqpRejectAndDontRequeueException`
+   (without the parser exception as cause: its message quotes the body, and
+   Spring's error handler logs the whole chain).
    → This exception tells Spring AMQP to **reject without requeue**: the
    broker applies the queue's `x-dead-letter-*` arguments at once. Any other
    exception is **requeued** (Spring AMQP's default): the poison would come
@@ -682,6 +710,7 @@ poison {"oops":true} ──► listings.messages ──► onMessage: parse fail
 - A poison that loops (`deliveries` climbing in the UI, the same warn line thousands of times) means the exception thrown is requeued: check it is `AmqpRejectAndDontRequeueException`, and that the main queue is a quorum queue with `x-delivery-limit`.
 - `PRECONDITION_FAILED - unknown delivery tag` in the logs: a manual `basicAck`/`basicNack` in `AUTO` mode. Remove it.
 - **Do not** set `requeue` behaviour globally to hide the problem: the explicit exception documents the decision in the code.
+- `{"oops":true}` dead-lettered with `x-death` reason `delivery_limit` (not `rejected`): it parsed (unknown properties are ignored) and failed later. Check the required fields of the envelope right after the parse.
 
 </details>
 
@@ -924,8 +953,11 @@ POST /messages ──► MessageService.send: INSERT row PENDING ──► try p
 
 2. **In `MessageService.send(...)`**, **replace** the Step 6 `try / catch`
    so that the broker failure no longer reaches the caller: insert the row as
-   `PENDING`, attempt the publish, set the row to `SENT` on success, and leave
-   it `PENDING` when the publish fails. Return the same 202 body in both
+   `PENDING`, attempt the publish, set the row to `SENT` on success **only if
+   it is still `PENDING`** (the conditional `UPDATE` of Step 8b), and leave
+   it `PENDING` when the publish fails. The consumer may process the message
+   before your update: an unconditional `SET status = SENT` would turn a
+   `DELIVERED` row back to `SENT` for good. Return the same 202 body in both
    cases, with `status` = `SENT` or `PENDING`.
    → The buyer's message is saved in your database in every case; the broker
    state only changes *when* it is published.
@@ -962,7 +994,7 @@ POST /messages ──► MessageService.send: INSERT row PENDING ──► try p
 
 **Outcome** — A **`@Scheduled` poller** re-publishes the `PENDING` rows within
 ~5 s of the broker coming back; each row is published **once**, even with two
-API instances. The **message is never lost**.
+API instances. A **broker outage** never loses a message.
 
 **Why this step** — The outbox is only half done while rows wait in the
 database. The poller moves them to the broker, and an atomic claim makes sure
@@ -1016,7 +1048,7 @@ two instances never publish the same row.
 | 8.3 | **The poller**: a `@Scheduled` method fires **every `interval-ms`** (default **5000** ms); for **each** `PENDING` row, **claims** it atomically (`UPDATE … WHERE status = 'PENDING'` — **before** the `convertAndSend`), **then** publishes to `listings.messages` | the **order is claim → publish**, not publish → claim. If you publish first, **two instances** on the **same** `PENDING` row both publish (the **race** is lost in the **air**, not in the DB) |
 | 8.4 | **Recovery**: broker down → **3** calls → **3** `PENDING` rows. `docker compose start rabbitmq` → within ~5 s, **3** rows become **`SENT`** (the broker's `ready` is **+3**), then **`DELIVERED`** (the Step 4 consumer drains them — **unchanged**); **no re-publish** of an already-SENT row (the `WHERE status = 'PENDING'` is the **guard**) | the **count of `PENDING` rows** is exactly the **number of failures** (the **poller never claims SENT**) |
 | 8.5 | **Idempotency** (Step 4 still applies): a redelivered row (the broker dropped the ack — classic) — the **consumer** (Step 4) **upserts** by `message_id` → **no duplicate row** | **`SELECT count(*) FROM message WHERE message_id = '<id>'` = 1**, regardless of how many times it was redelivered |
-| 8.6 | **Multi-instance** (run **two** `listings-api` instances simultaneously, both with the **same** DB → both will have their **own** **pollers** on the **same** `PENDING` rows): exactly **one** of them publishes per row | **`count(*) = 1`** per `message_id` (no double-publish). The **`UPDATE … WHERE status = 'PENDING'`** is the **atomic claim** — the **loser** gets **0 rows affected** → skips the publish. This is **the entire reason** the **UPDATE is BEFORE the `convertAndSend`** |
+| 8.6 | **Multi-instance** (run **two** `listings-api` instances simultaneously — [`docs/verification.md` §12b](docs/verification.md), optional block — both with the **same** DB → both will have their **own** **pollers** on the **same** `PENDING` rows): exactly **one** of them publishes per row | **`count(*) = 1`** per `message_id` (no double-publish). The **`UPDATE … WHERE status = 'PENDING'`** is the **atomic claim** — the **loser** gets **0 rows affected** → skips the publish. This is **the entire reason** the **UPDATE is BEFORE the `convertAndSend`** |
 
 ### Verify
 
@@ -1028,6 +1060,7 @@ two instances never publish the same row.
 
 - The **`@Scheduled`** import is **`org.springframework.scheduling.annotation.Scheduled`**. The **`@EnableScheduling`** **annotation** is a **`@Configuration`** (put it on the **main** app class, or on a **dedicated** `@Configuration`). Without it, `@Scheduled` is **silently ignored** — your **poller will not run** and you will get **`PENDING` rows that never leave the DB**.
 - The **`UPDATE … WHERE status = 'PENDING'`** is an **atomic claim**: **`int affected = repo.claim(id);`** — if **`affected == 0`**, **another instance** won the **race**; **do not** publish. **If `affected == 1`**, do **`convertAndSend`**. The **order matters** (claim **first**, publish **second**) — publish **first** = **double-publish race** (the **entire point** of 8.6).
+- The price of claim → publish: an instance that dies between the claim and the `convertAndSend` leaves a `SENT` row that was never published. The other order (publish, then mark) would publish twice instead, which the idempotent consumer absorbs. Name the trade-off in your decision log.
 - The **`WHERE`** clause is **the guard** (the **PK** `message_id` is the **lookup**; the **`status`** is the **gate**). Both are correct, but **the status check is non-redundant** — it is the **only** way to claim **without** a lock.
 - `@Scheduled(fixedDelayString = "${…:5000}")` reads the delay from a property, with a default.
 - A JPQL `UPDATE` in a repository needs `@Modifying` + `@Query` (`org.springframework.data.jpa.repository`), returns an `int` (rows affected), and runs inside a transaction: put `@Transactional` on the method or on its caller, otherwise Spring Data raises `TransactionRequiredException`. Reference: <https://docs.spring.io/spring-data/jpa/reference/4.1/jpa/modifying-queries.html>
@@ -1090,7 +1123,7 @@ that you can explain each decision.
 - [ ] `cd "$MSG_DIR" && docker compose up -d` → `docker compose ps` shows **`rabbitmq`** healthy
 - [ ] `curl -fsS http://localhost:8080/actuator/health` → **200** (the **app** is up and connected to **both** Postgres and RabbitMQ)
 - [ ] **One buyer `POST`** → **202** with `"status":"SENT"`
-- [ ] **One consumer drain** → `psql SELECT status FROM message WHERE message_id='<that-uuid>'` → **`DELIVERED`**; the **seller's** `GET /listings/{id}/messages` returns the **2 turns** (their own opening + the seller's reply)
+- [ ] **One consumer drain** → `psql SELECT status FROM message WHERE message_id='<that-uuid>'` → **`DELIVERED`**; the **buyer's** and the **seller's** `GET /listings/{id}/messages` return the **2 turns** (the buyer's opening + the seller's reply)
 - [ ] **`mvn clean verify`** in the TP1 repo → **BUILD SUCCESS** (the TP1 smoke test + **your** messaging smoke test **both pass**)
 - [ ] **The decision log is in the TP1 repo's `README.md`** (5–6 short paragraphs of *why*)
 - [ ] **No secrets** in either repo: the broker credential is **in** the `messaging/docker-compose.yml` **and** the TP1's `application.yml` reads `RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:listings}` (**demo** value `listings`, **overridable** by env var); **no** real password in either **compose** or **application.yml**
@@ -1185,7 +1218,9 @@ in the paths.
 > queue. Address one queue by its path, `/api/queues/%2F/{name}`.
 >
 > The counters (`messages_ready`, `consumers`, …) are refreshed about every
-> **5 s**: read them a few seconds after an action, not immediately.
+> **5 s**, and the first read after a queue is created can lag more: read
+> them **~10 s** after an action, or ask the broker directly
+> (`docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready consumers`).
 
 ---
 
@@ -1218,7 +1253,7 @@ in the paths.
 > **TP rule (final repeat):** no `TODO`, no stub, no secret in code, no
 > **silent** swallow of a message (the **DLQ** is the **right** place), and
 > the **broker is a runtime, not a source of truth** — the **topology** is
-> code in `com.app.listings.messaging.RabbitConfig`, the **messages** are
+> code in `com.app.listings.messaging.config.RabbitConfig`, the **messages** are
 > **data**.
 
 ---
@@ -1233,6 +1268,6 @@ The new row compared to TP1 is **503**
 | **401** | Unauthenticated `POST /listings/{id}/messages` | Spring Security (TP1 — no change) |
 | **403** | (TP1 invariant) Non-owner writes are out of scope for this TP (no PUT on a listing you do not own) | Spring Security (TP1) |
 | **404** | `POST/GET /listings/{unknown-id}/*messages` (no such listing) | `ResourceNotFoundException` (TP1) |
-| **422** | **Self-message** (`from == to`); empty `body`; `inReplyTo` is not a known/visible message id on this listing; `inReplyTo` from a different thread | `MethodArgumentNotValidException` → TP1 `GlobalExceptionHandler` (with `fields` map) |
+| **422** | **Self-message** (`from == to`); empty `body`; `inReplyTo` is not a known/visible message id on this listing; `inReplyTo` from a different thread | blank `body`: `@NotBlank` → `MethodArgumentNotValidException` → TP1 `GlobalExceptionHandler`; self-message and `inReplyTo`: your own exception from `MessageService`, mapped to a 422 with the same shape (`fields` map) |
 | **503** | **Broker unavailable** at publish time (Step 6) | any `AmqpException` from `RabbitTemplate` (in practice `AmqpIOException` / `AmqpConnectException`) → custom `BrokerUnavailableException` → **one** `@ExceptionHandler` returning the TP1 JSON shape **with status 503** and a useful message (example: `"rabbitmq not reachable — check docker compose / RABBITMQ_HOST / RABBITMQ_PORT"`) |
 | **500** | (invariant) Unexpected error | TP1 `GlobalExceptionHandler` generic handler |
